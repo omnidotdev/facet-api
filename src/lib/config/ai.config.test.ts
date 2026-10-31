@@ -36,7 +36,7 @@ describe("getAiConfig", () => {
     const cfg = getAiConfig();
     expect(cfg.managedEnabled).toBe(false);
     expect(cfg.synapseApiKey).toBeUndefined();
-    expect(cfg.model).toBe("claude-sonnet-5-5");
+    expect(cfg.model).toBe("anthropic/claude-sonnet-4-5-20250929");
     expect(cfg.maxPromptChars).toBe(2000);
     expect(cfg.maxOutputTokens).toBe(2048);
     expect(cfg.dailySpendCeilingCents).toBe(500);

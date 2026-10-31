@@ -16,14 +16,20 @@ interface ModelRate {
 
 /**
  * Known Claude model rates (Anthropic first-party list prices).
- * Synapse is the source of truth for real spend when it returns a cost; this
- * table only backs the estimate fallback
+ * Keyed by the Synapse model id (provider-prefixed, e.g. anthropic/...), since
+ * that is what is sent to the gateway. Synapse is the source of truth for real
+ * spend when it returns a cost; this table only backs the estimate fallback
  */
 const MODEL_RATES: Record<string, ModelRate> = {
-  "claude-opus-5-5": { inputCentsPerMTok: 400, outputCentsPerMTok: 2000 },
-  "claude-opus-5": { inputCentsPerMTok: 500, outputCentsPerMTok: 2500 },
-  "claude-sonnet-5-5": { inputCentsPerMTok: 200, outputCentsPerMTok: 1000 },
-  "claude-haiku-5-5": { inputCentsPerMTok: 10, outputCentsPerMTok: 50 },
+  "anthropic/claude-opus-4-6": { inputCentsPerMTok: 1500, outputCentsPerMTok: 7500 },
+  "anthropic/claude-sonnet-4-5-20250929": {
+    inputCentsPerMTok: 300,
+    outputCentsPerMTok: 1500,
+  },
+  "anthropic/claude-haiku-4-5-20251001": {
+    inputCentsPerMTok: 100,
+    outputCentsPerMTok: 500,
+  },
 };
 
 /** Fallback rate for an unknown model, conservative (Opus-tier) so we never under-charge. */
@@ -32,10 +38,11 @@ const DEFAULT_MODEL_RATE: ModelRate = {
   outputCentsPerMTok: 2000,
 };
 
-// Sonnet is the default: latest-generation, strong at code, and far cheaper per
-// token than Opus, which matters for a high-volume generation endpoint. Override
-// with FACET_AI_MODEL (e.g. claude-opus-5-5) when a request needs maximum quality
-const DEFAULT_MODEL = "claude-sonnet-5-5";
+// Sonnet is the default: strong at code and far cheaper per token than Opus,
+// which matters for a high-volume generation endpoint. Model ids are Synapse's
+// provider-prefixed ids (confirmed against the gateway's /v1/models). Override
+// with FACET_AI_MODEL (e.g. anthropic/claude-opus-4-6) for maximum quality
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
 
 /** Resolve the spend rate for a model, falling back to a conservative default. */
 const rateForModel = (model: string): ModelRate =>
