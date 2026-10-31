@@ -52,6 +52,25 @@ Defense-in-depth. Each layer is independent, so a bug in one does not defeat the
 
 > Per-user auth gating and hard-capped credits (money-safety layers 4-5 of the plan) land in Phase C, backed by the Drizzle tables this service carries from the template. Phase A keeps the breaker and rate limiter in-memory.
 
+## Environment
+
+The service boots with nothing set. Every variable is optional; the managed path is the only feature that needs configuration, and it degrades to a clean `503` (with a startup warning) when its key is absent.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SYNAPSE_BASE_URL` | `http://localhost:6000` | Synapse AI router base URL. |
+| `SYNAPSE_API_KEY` | _(unset)_ | Server-side Synapse key. Unset disables the managed path (BYOK still works). Never shipped to the browser. |
+| `FACET_AI_MODEL` | `claude-opus-5-5` | Claude model id passed through to Synapse. |
+| `MAX_PROMPT_CHARS` | `2000` | Maximum accepted prompt length. |
+| `MAX_OUTPUT_TOKENS` | `2048` | Output token ceiling per call. |
+| `AI_REQUEST_TIMEOUT_MS` | `30000` | Synapse request timeout. |
+| `MAX_REPAIR_ATTEMPTS` | `2` | Repair-attempt ceiling per generation. |
+| `DAILY_SPEND_CEILING_CENTS` | `500` | Global managed spend breaker, per UTC day. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP rate-limit window. |
+| `RATE_LIMIT_MAX` | `20` | Max requests per IP per window. |
+
+`DATABASE_URL`, GraphQL, and Vortex variables are Phase C scaffolding and unused by the Phase A gateway. See [`.env.local.template`](.env.local.template) for the full list.
+
 ## Local development
 
 ```sh
