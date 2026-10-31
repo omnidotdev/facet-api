@@ -32,7 +32,10 @@ const DEFAULT_MODEL_RATE: ModelRate = {
   outputCentsPerMTok: 2000,
 };
 
-const DEFAULT_MODEL = "claude-opus-5-5";
+// Sonnet is the default: latest-generation, strong at code, and far cheaper per
+// token than Opus, which matters for a high-volume generation endpoint. Override
+// with FACET_AI_MODEL (e.g. claude-opus-5-5) when a request needs maximum quality
+const DEFAULT_MODEL = "claude-sonnet-5-5";
 
 /** Resolve the spend rate for a model, falling back to a conservative default. */
 const rateForModel = (model: string): ModelRate =>
