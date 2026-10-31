@@ -13,12 +13,24 @@ const CODE = "const part = cube(10);\nreturn part;";
 const FENCED = `Here you go:\n\`\`\`ts\n${CODE}\n\`\`\``;
 
 type Caller = Parameters<typeof createGenerateRoute>[0]["callSynapse"];
+type Authenticate = Parameters<typeof createGenerateRoute>[0]["authenticate"];
 
 interface Overrides {
   caller?: Caller;
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
+  authenticate?: Authenticate;
 }
+
+/** Build an authenticate stub that records how many times it ran. */
+const makeAuthenticator = (identity: { userId: string } | null) => {
+  const calls: { count: number } = { count: 0 };
+  const authenticate: Authenticate = async () => {
+    calls.count += 1;
+    return identity;
+  };
+  return { authenticate, calls };
+};
 
 const makeCaller = (
   text: string,
@@ -44,6 +56,10 @@ const makeApp = (overrides: Overrides = {}) => {
       rateLimiter:
         overrides.rateLimiter ??
         createRateLimiter({ windowMs: 60_000, max: 100 }),
+      // default to a valid identity so managed-path tests proceed
+      authenticate:
+        overrides.authenticate ??
+        makeAuthenticator({ userId: "user-1" }).authenticate,
     }),
   );
 
@@ -149,6 +165,43 @@ describe("POST /generate", () => {
     expect(calls[0]!.apiKey).toBe("byok-xyz");
     // BYOK spend is not recorded against our breaker
     expect(breaker.spentTodayCents()).toBe(100);
+  });
+
+  test("managed path with no identity returns a generic 401 and never calls Synapse", async () => {
+    const { authenticate, calls: authCalls } = makeAuthenticator(null);
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller, authenticate });
+    const res = await request({ prompt: "a cube" });
+
+    expect(res.status).toBe(401);
+    const json = await res.json();
+    expect(typeof json.error).toBe("string");
+    expect(authCalls.count).toBe(1);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("managed path with a valid identity authenticates and proceeds", async () => {
+    const { authenticate, calls: authCalls } = makeAuthenticator({
+      userId: "user-42",
+    });
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller, authenticate });
+    const res = await request({ prompt: "a cube" });
+
+    expect(res.status).toBe(200);
+    expect(authCalls.count).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("BYOK path skips authentication entirely", async () => {
+    const { authenticate, calls: authCalls } = makeAuthenticator(null);
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller, authenticate });
+    const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
+
+    expect(res.status).toBe(200);
+    expect(authCalls.count).toBe(0);
+    expect(calls).toHaveLength(1);
   });
 
   test("managed path forwards no BYOK key and records spend in the breaker", async () => {

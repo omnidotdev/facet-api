@@ -13,6 +13,7 @@ import { schema } from "generated/graphql/schema.executable";
 import { useGrafast } from "grafast/envelop";
 import webhooks from "webhooks";
 
+import { authenticateUser } from "lib/auth/authenticateUser";
 import { getAiConfig } from "lib/config/ai.config";
 import appConfig from "lib/config/app.config";
 import {
@@ -131,6 +132,7 @@ const app = new Elysia({
       callSynapse,
       breaker: spendBreaker,
       rateLimiter: aiRateLimiter,
+      authenticate: authenticateUser,
     }),
   )
   .use(webhooks)

@@ -16,9 +16,10 @@ import type { callSynapse } from "lib/synapse/client";
  * Money-safety is defense-in-depth and each layer is independent:
  * - the server Synapse key lives only in config, never in a response or a log
  * - the managed path requires the key and an untripped global daily breaker
+ * - the managed path requires a signed-in Omni identity (no anonymous paid inference)
  * - per-request caps (prompt length, output tokens, timeout) bound each call
  * - a per-IP sliding-window limiter throttles abuse
- * - BYOK bypasses the managed breaker and meter entirely (zero cost to us)
+ * - BYOK bypasses auth, the managed breaker, and the meter entirely (zero cost to us)
  *
  * Dependencies are injected so every branch is deterministically testable
  */
@@ -27,6 +28,8 @@ interface GenerateDeps {
   callSynapse: typeof callSynapse;
   breaker: SpendBreaker;
   rateLimiter: RateLimiter;
+  /** Resolve the signed-in Omni identity for a request, or null when absent/invalid. */
+  authenticate: (request: Request) => Promise<{ userId: string } | null>;
 }
 
 interface GenerateBody {
@@ -42,6 +45,8 @@ const MESSAGES = {
   rateLimited: "Too many requests. Please slow down and try again.",
   repairLimited:
     "Too many repair attempts. Please adjust your prompt and try again.",
+  unauthorized:
+    "Sign in to use managed AI generation, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
   noCode: "Could not generate valid code. Try rephrasing your request.",
   failed: "AI generation failed. Please try again.",
@@ -97,7 +102,7 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       return { error: MESSAGES.repairLimited };
     }
 
-    // 4. managed-path gating (BYOK bypasses both checks)
+    // 4. managed-path gating (BYOK bypasses every managed check)
     const byokKey =
       typeof input.byokKey === "string" && input.byokKey.length > 0
         ? input.byokKey
@@ -106,6 +111,13 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       if (!cfg.managedEnabled || deps.breaker.isTripped()) {
         set.status = 503;
         return { error: MESSAGES.unavailable };
+      }
+
+      // require a signed-in Omni identity before spending our key
+      const identity = await deps.authenticate(request);
+      if (!identity) {
+        set.status = 401;
+        return { error: MESSAGES.unauthorized };
       }
     }
 
