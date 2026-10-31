@@ -13,6 +13,7 @@ import { schema } from "generated/graphql/schema.executable";
 import { useGrafast } from "grafast/envelop";
 import webhooks from "webhooks";
 
+import { getAiConfig } from "lib/config/ai.config";
 import appConfig from "lib/config/app.config";
 import {
   CORS_ALLOWED_ORIGINS,
@@ -20,10 +21,14 @@ import {
   isDevEnv,
   isProdEnv,
 } from "lib/config/env.config";
+import { createSpendBreaker } from "lib/cost/breaker";
+import { createRateLimiter } from "lib/cost/rateLimit";
 import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
+import { createGenerateRoute } from "lib/routes/generate";
+import { callSynapse } from "lib/synapse/client";
 
 const commit = (() => {
   try {
@@ -34,7 +39,28 @@ const commit = (() => {
 })();
 
 // ensure database exists before starting
-await ensureDatabase();
+// Phase A has no DB-backed behavior, so a missing database must not block boot
+// (the AI gateway and BYOK still work). The DB is wired for real in Phase C
+try {
+  await ensureDatabase();
+} catch (err) {
+  const reason = err instanceof Error ? err.message : "unknown";
+  console.warn(
+    `[startup] database unavailable, DB-backed features disabled: ${reason}`,
+  );
+}
+
+// AI gateway singletons (in-memory cost controls for Phase A)
+// TODO Phase C: back the breaker and rate limiter with the DB or a shared store
+const aiConfig = getAiConfig();
+if (!aiConfig.managedEnabled) {
+  console.warn("SYNAPSE_API_KEY not set, managed AI generation disabled");
+}
+const spendBreaker = createSpendBreaker(aiConfig.dailySpendCeilingCents);
+const aiRateLimiter = createRateLimiter({
+  windowMs: aiConfig.rateLimitWindowMs,
+  max: aiConfig.rateLimitMax,
+});
 
 /**
  * Elysia server.
@@ -99,6 +125,14 @@ const app = new Elysia({
       };
     }
   })
+  // AI generation gateway (the money-spending route)
+  .use(
+    createGenerateRoute({
+      callSynapse,
+      breaker: spendBreaker,
+      rateLimiter: aiRateLimiter,
+    }),
+  )
   .use(webhooks)
   .use(
     yoga({
