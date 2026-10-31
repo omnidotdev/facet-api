@@ -65,10 +65,10 @@ describe("getAiConfig", () => {
   });
 
   test("resolves the spend rate for the active model with a conservative fallback", () => {
-    process.env.FACET_AI_MODEL = "claude-haiku-5-5";
+    process.env.FACET_AI_MODEL = "anthropic/claude-haiku-4-5-20251001";
     expect(getAiConfig().rate).toEqual({
-      inputCentsPerMTok: 10,
-      outputCentsPerMTok: 50,
+      inputCentsPerMTok: 100,
+      outputCentsPerMTok: 500,
     });
 
     process.env.FACET_AI_MODEL = "some-unknown-model";

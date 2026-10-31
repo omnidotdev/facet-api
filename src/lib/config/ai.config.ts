@@ -21,7 +21,10 @@ interface ModelRate {
  * spend when it returns a cost; this table only backs the estimate fallback
  */
 const MODEL_RATES: Record<string, ModelRate> = {
-  "anthropic/claude-opus-4-6": { inputCentsPerMTok: 1500, outputCentsPerMTok: 7500 },
+  "anthropic/claude-opus-4-6": {
+    inputCentsPerMTok: 1500,
+    outputCentsPerMTok: 7500,
+  },
   "anthropic/claude-sonnet-4-5-20250929": {
     inputCentsPerMTok: 300,
     outputCentsPerMTok: 1500,
