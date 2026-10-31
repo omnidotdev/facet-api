@@ -7,6 +7,7 @@ import { createRateLimiter } from "lib/cost/rateLimit";
 import { createGenerateRoute } from "./generate";
 
 import type { SpendBreaker } from "lib/cost/breaker";
+import type { CreditStore } from "lib/cost/creditStore";
 import type { RateLimiter } from "lib/cost/rateLimit";
 
 const CODE = "const part = cube(10);\nreturn part;";
@@ -20,7 +21,30 @@ interface Overrides {
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
+  creditStore?: CreditStore;
 }
+
+/**
+ * In-memory CreditStore fake. Every user starts at `seedUsed` credits against a
+ * shared `capCredits`, and recordSpend accumulates, so the enforcement logic is
+ * exercised with no database
+ */
+const makeCreditStore = (capCredits = 1000, seedUsed = 0) => {
+  const used = new Map<string, number>();
+  const getCalls: string[] = [];
+  const spendCalls: { userId: string; credits: number }[] = [];
+  const store: CreditStore = {
+    async getMonthlyUsage(userId) {
+      getCalls.push(userId);
+      return { usedCredits: used.get(userId) ?? seedUsed, capCredits };
+    },
+    async recordSpend(userId, credits) {
+      spendCalls.push({ userId, credits });
+      used.set(userId, (used.get(userId) ?? seedUsed) + credits);
+    },
+  };
+  return { store, getCalls, spendCalls };
+};
 
 /** Build an authenticate stub that records how many times it ran. */
 const makeAuthenticator = (identity: { userId: string } | null) => {
@@ -60,6 +84,8 @@ const makeApp = (overrides: Overrides = {}) => {
       authenticate:
         overrides.authenticate ??
         makeAuthenticator({ userId: "user-1" }).authenticate,
+      // default to a generous cap so managed-path tests are not credit-blocked
+      creditStore: overrides.creditStore ?? makeCreditStore().store,
     }),
   );
 
@@ -202,6 +228,44 @@ describe("POST /generate", () => {
     expect(res.status).toBe(200);
     expect(authCalls.count).toBe(0);
     expect(calls).toHaveLength(1);
+  });
+
+  test("managed path over the monthly credit cap returns a generic 402 and never calls Synapse", async () => {
+    const { store, spendCalls } = makeCreditStore(100, 100); // used == cap
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller, creditStore: store });
+    const res = await request({ prompt: "a cube" });
+
+    expect(res.status).toBe(402);
+    const json = await res.json();
+    expect(typeof json.error).toBe("string");
+    expect(calls).toHaveLength(0);
+    expect(spendCalls).toHaveLength(0);
+  });
+
+  test("managed success records the spent credits against the user", async () => {
+    const { store, getCalls, spendCalls } = makeCreditStore(1000, 0);
+    const { authenticate } = makeAuthenticator({ userId: "user-42" });
+    // 3 cents -> ceil -> 3 credits
+    const { caller } = makeCaller(FENCED, 3);
+    const request = makeApp({ caller, authenticate, creditStore: store });
+    const res = await request({ prompt: "a cube" });
+
+    expect(res.status).toBe(200);
+    expect(getCalls).toEqual(["user-42"]);
+    expect(spendCalls).toEqual([{ userId: "user-42", credits: 3 }]);
+  });
+
+  test("BYOK path never touches the credit meter", async () => {
+    const { store, getCalls, spendCalls } = makeCreditStore(100, 100); // over cap
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller, creditStore: store });
+    const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
+
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(getCalls).toHaveLength(0);
+    expect(spendCalls).toHaveLength(0);
   });
 
   test("managed path forwards no BYOK key and records spend in the breaker", async () => {

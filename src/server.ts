@@ -23,6 +23,7 @@ import {
   isProdEnv,
 } from "lib/config/env.config";
 import { createSpendBreaker } from "lib/cost/breaker";
+import { createDrizzleCreditStore } from "lib/cost/creditStore.drizzle";
 import { createRateLimiter } from "lib/cost/rateLimit";
 import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
@@ -51,8 +52,13 @@ try {
   );
 }
 
-// AI gateway singletons (in-memory cost controls for Phase A)
-// TODO Phase C: back the breaker and rate limiter with the DB or a shared store
+// AI gateway singletons.
+// The per-user credit meter is DB-backed (durable across instances and
+// restarts). The global daily breaker and per-IP rate limiter stay in-memory:
+// DB-backing them cleanly needs atomic counters and a shared window, which is
+// more than a small change, and the Synapse-key hard budget plus the per-user
+// cap already bound worst-case loss. Moving them to a shared store is the
+// remaining Phase C work (see the TODOs in breaker.ts and rateLimit.ts)
 const aiConfig = getAiConfig();
 if (!aiConfig.managedEnabled) {
   console.warn("SYNAPSE_API_KEY not set, managed AI generation disabled");
@@ -62,6 +68,10 @@ const aiRateLimiter = createRateLimiter({
   windowMs: aiConfig.rateLimitWindowMs,
   max: aiConfig.rateLimitMax,
 });
+const creditStore = createDrizzleCreditStore(
+  dbPool,
+  aiConfig.freeMonthlyCredits,
+);
 
 /**
  * Elysia server.
@@ -133,6 +143,7 @@ const app = new Elysia({
       breaker: spendBreaker,
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
+      creditStore,
     }),
   )
   .use(webhooks)

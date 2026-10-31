@@ -3,10 +3,14 @@
  *
  * Tracks aggregate managed model spend per UTC day and trips once a configured
  * ceiling is reached, so a bug or abuse upstream cannot run spend past a known
- * bound. In-memory for Phase A: process-local and reset on restart.
+ * bound. In-memory: process-local and reset on restart.
  *
- * TODO Phase C: back this with the database (or a shared store) so the ceiling
- * holds across instances and restarts
+ * Phase C left this in-memory on purpose. The per-user credit meter is the
+ * DB-backed layer; this breaker is a coarse global backstop, and backing it
+ * cleanly needs an atomic shared daily counter. Worst-case loss is already
+ * bounded by the Synapse-key hard budget and the per-user cap.
+ * TODO: back this with a shared store (DB or Redis) so the ceiling holds across
+ * instances and restarts
  */
 
 export interface SpendBreaker {

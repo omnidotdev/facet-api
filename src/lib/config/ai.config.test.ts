@@ -9,6 +9,7 @@ const KEYS = [
   "MAX_PROMPT_CHARS",
   "MAX_OUTPUT_TOKENS",
   "DAILY_SPEND_CEILING_CENTS",
+  "FREE_MONTHLY_CREDITS",
   "RATE_LIMIT_WINDOW_MS",
   "RATE_LIMIT_MAX",
 ] as const;
@@ -39,6 +40,7 @@ describe("getAiConfig", () => {
     expect(cfg.maxPromptChars).toBe(2000);
     expect(cfg.maxOutputTokens).toBe(2048);
     expect(cfg.dailySpendCeilingCents).toBe(500);
+    expect(cfg.freeMonthlyCredits).toBe(100);
     expect(cfg.maxRepairAttempts).toBe(2);
     expect(cfg.rateLimitWindowMs).toBe(60_000);
     expect(cfg.rateLimitMax).toBe(20);

@@ -27,6 +27,8 @@ Request:
 }
 ```
 
+The managed path (no `byokKey`) requires a signed-in Omni user: send the user's access token as `Authorization: Bearer <token>` (the same Better Auth / Gatekeeper token the rest of the fleet uses). A missing or invalid token returns `401`; a user who has spent all their monthly credits returns `402`. BYOK requests need no auth and are not credit-metered.
+
 Response:
 
 ```jsonc
@@ -46,11 +48,13 @@ Defense-in-depth. Each layer is independent, so a bug in one does not defeat the
 1. **Server-only key.** `SYNAPSE_API_KEY` lives only here, never `VITE_`-prefixed, never shipped to the browser, never written to a response body or a log.
 2. **Synapse-key hard budget.** The provisioned key carries a hard monthly ceiling set in Synapse (Phase D), bounding worst-case total loss.
 3. **Global daily spend breaker.** Aggregate managed spend is tracked per UTC day; `/generate` returns `503` once `DAILY_SPEND_CEILING_CENTS` is hit.
-4. **Per-request caps.** `MAX_PROMPT_CHARS`, `MAX_OUTPUT_TOKENS`, a request timeout, and `MAX_REPAIR_ATTEMPTS`, all enforced server-side.
-5. **Per-IP rate limit.** Sliding-window limiter on `/generate`; `429` on exceed.
-6. **BYOK escape hatch.** A caller may send their own key per-request over TLS. It is never persisted, bills to them, and bypasses the managed breaker and credit meter entirely.
+4. **Auth-gated managed path.** The managed path requires a valid signed-in Omni identity (bearer token verified via Gatekeeper); no anonymous access to paid inference, `401` otherwise.
+5. **Per-user hard-capped credits.** Managed usage is metered per user per UTC month against `FREE_MONTHLY_CREDITS` with no overage; `/generate` returns `402` once the cap is reached. Usage is persisted in the `credit_ledger` table, so the cap holds across instances and restarts.
+6. **Per-request caps.** `MAX_PROMPT_CHARS`, `MAX_OUTPUT_TOKENS`, a request timeout, and `MAX_REPAIR_ATTEMPTS`, all enforced server-side.
+7. **Per-IP rate limit.** Sliding-window limiter on `/generate`; `429` on exceed.
+8. **BYOK escape hatch.** A caller may send their own key per-request over TLS. It is never persisted, bills to them, and bypasses auth, the managed breaker, and the credit meter entirely.
 
-> Per-user auth gating and hard-capped credits (money-safety layers 4-5 of the plan) land in Phase C, backed by the Drizzle tables this service carries from the template. Phase A keeps the breaker and rate limiter in-memory.
+> The per-user credit meter is DB-backed. The global daily breaker and per-IP rate limiter stay in-memory: the Synapse-key hard budget plus the per-user cap already bound worst-case loss, so moving them to a shared store is deferred (see the `TODO`s in `src/lib/cost/breaker.ts` and `rateLimit.ts`). The per-user cap is read from `FREE_MONTHLY_CREDITS` for now and will be sourced from Aether entitlements in Phase D.
 
 ## Environment
 
@@ -60,16 +64,19 @@ The service boots with nothing set. Every variable is optional; the managed path
 | --- | --- | --- |
 | `SYNAPSE_BASE_URL` | `http://localhost:6000` | Synapse AI router base URL. |
 | `SYNAPSE_API_KEY` | _(unset)_ | Server-side Synapse key. Unset disables the managed path (BYOK still works). Never shipped to the browser. |
-| `FACET_AI_MODEL` | `claude-opus-5-5` | Claude model id passed through to Synapse. |
+| `FACET_AI_MODEL` | `claude-sonnet-5-5` | Claude model id passed through to Synapse. |
 | `MAX_PROMPT_CHARS` | `2000` | Maximum accepted prompt length. |
 | `MAX_OUTPUT_TOKENS` | `2048` | Output token ceiling per call. |
 | `AI_REQUEST_TIMEOUT_MS` | `30000` | Synapse request timeout. |
 | `MAX_REPAIR_ATTEMPTS` | `2` | Repair-attempt ceiling per generation. |
 | `DAILY_SPEND_CEILING_CENTS` | `500` | Global managed spend breaker, per UTC day. |
+| `FREE_MONTHLY_CREDITS` | `100` | Per-user hard cap on managed credits per UTC month. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP rate-limit window. |
 | `RATE_LIMIT_MAX` | `20` | Max requests per IP per window. |
+| `AUTH_BASE_URL` | `https://localhost:8000` | Gatekeeper base URL used to verify the managed path's bearer token. |
+| `DATABASE_URL` | _(unset)_ | Postgres connection for the credit meter. The managed path needs it; BYOK does not. |
 
-`DATABASE_URL`, GraphQL, and Vortex variables are Phase C scaffolding and unused by the Phase A gateway. See [`.env.local.template`](.env.local.template) for the full list.
+The managed path depends on `SYNAPSE_API_KEY`, `AUTH_BASE_URL`, and `DATABASE_URL`; BYOK needs none of them. GraphQL and Vortex variables remain scaffolding. See [`.env.local.template`](.env.local.template) for the full list.
 
 ## Local development
 

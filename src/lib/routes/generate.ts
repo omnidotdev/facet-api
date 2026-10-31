@@ -7,6 +7,7 @@ import {
 } from "lib/prompt/facetSystemPrompt";
 
 import type { SpendBreaker } from "lib/cost/breaker";
+import type { CreditStore } from "lib/cost/creditStore";
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { callSynapse } from "lib/synapse/client";
 
@@ -17,6 +18,7 @@ import type { callSynapse } from "lib/synapse/client";
  * - the server Synapse key lives only in config, never in a response or a log
  * - the managed path requires the key and an untripped global daily breaker
  * - the managed path requires a signed-in Omni identity (no anonymous paid inference)
+ * - the managed path is hard-capped per user per UTC month with no overage
  * - per-request caps (prompt length, output tokens, timeout) bound each call
  * - a per-IP sliding-window limiter throttles abuse
  * - BYOK bypasses auth, the managed breaker, and the meter entirely (zero cost to us)
@@ -30,6 +32,8 @@ interface GenerateDeps {
   rateLimiter: RateLimiter;
   /** Resolve the signed-in Omni identity for a request, or null when absent/invalid. */
   authenticate: (request: Request) => Promise<{ userId: string } | null>;
+  /** Per-user monthly credit meter for the managed path. */
+  creditStore: CreditStore;
 }
 
 interface GenerateBody {
@@ -47,6 +51,8 @@ const MESSAGES = {
     "Too many repair attempts. Please adjust your prompt and try again.",
   unauthorized:
     "Sign in to use managed AI generation, or provide your own key.",
+  overCap:
+    "You have used all of your AI credits for this month. Upgrade for more, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
   noCode: "Could not generate valid code. Try rephrasing your request.",
   failed: "AI generation failed. Please try again.",
@@ -107,6 +113,7 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       typeof input.byokKey === "string" && input.byokKey.length > 0
         ? input.byokKey
         : undefined;
+    let userId: string | undefined;
     if (!byokKey) {
       if (!cfg.managedEnabled || deps.breaker.isTripped()) {
         set.status = 503;
@@ -118,6 +125,14 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       if (!identity) {
         set.status = 401;
         return { error: MESSAGES.unauthorized };
+      }
+      userId = identity.userId;
+
+      // enforce the per-user hard monthly credit cap before any spend
+      const usage = await deps.creditStore.getMonthlyUsage(userId);
+      if (usage.usedCredits >= usage.capCredits) {
+        set.status = 402;
+        return { error: MESSAGES.overCap };
       }
     }
 
@@ -154,12 +169,26 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     }
 
     // 8. meter managed spend only (BYOK is billed to the caller)
-    if (!byokKey) deps.breaker.record(result.usage.costCents);
+    const credits = Math.ceil(result.usage.costCents);
+    if (!byokKey && userId) {
+      deps.breaker.record(result.usage.costCents);
+      // the spend already happened upstream, so a meter write failure must not
+      // fail the response or lose the user's code; log and fall through
+      try {
+        await deps.creditStore.recordSpend(userId, credits);
+      } catch (err) {
+        logFailure(
+          `credit record failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      }
+    }
 
     return {
       code,
       usage: {
-        credits: Math.ceil(result.usage.costCents),
+        credits,
         costCents: result.usage.costCents,
       },
     };

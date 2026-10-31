@@ -15,6 +15,13 @@
       "when": 1769223294052,
       "tag": "0001_parallel_wrecking_crew",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793469527594,
+      "tag": "0002_magenta_rafael_vega",
+      "breakpoints": true
     }
   ]
 }
