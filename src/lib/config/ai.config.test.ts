@@ -46,6 +46,19 @@ describe("getAiConfig", () => {
     expect(cfg.rateLimitMax).toBe(20);
   });
 
+  test("the default model is a Synapse provider-prefixed id with an explicit rate", () => {
+    // Guards the class of bug that broke managed + BYOK: a bare id like
+    // "claude-sonnet-5-5" 404s at the Synapse gateway, which only accepts
+    // provider-prefixed ids (e.g. anthropic/...). The default must also carry an
+    // explicit rate, not the conservative opus-tier fallback
+    const cfg = getAiConfig();
+    expect(cfg.model).toMatch(/^[a-z0-9-]+\/.+/);
+    expect(cfg.rate).not.toEqual({
+      inputCentsPerMTok: 400,
+      outputCentsPerMTok: 2000,
+    });
+  });
+
   test("enables the managed path once a server key is present", () => {
     process.env.SYNAPSE_API_KEY = "server-key";
     expect(getAiConfig().managedEnabled).toBe(true);
