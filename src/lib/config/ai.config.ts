@@ -77,7 +77,7 @@ interface AiConfig {
   maxRepairAttempts: number;
   /** Global managed spend ceiling per UTC day in US cents. */
   dailySpendCeilingCents: number;
-  /** Per-user hard cap on managed credits per UTC month. */
+  /** Static fallback cap for managed credits per UTC month, used when Aether has no entitlement or is unreachable. */
   freeMonthlyCredits: number;
   /** Per-IP rate limit window in milliseconds. */
   rateLimitWindowMs: number;
@@ -108,7 +108,9 @@ export const getAiConfig = (): AiConfig => {
     requestTimeoutMs: toInt(env.AI_REQUEST_TIMEOUT_MS, 30_000),
     maxRepairAttempts: toInt(env.MAX_REPAIR_ATTEMPTS, 2),
     dailySpendCeilingCents: toInt(env.DAILY_SPEND_CEILING_CENTS, 500),
-    // TODO: source the cap from Aether entitlements in Phase D
+    // Static fallback only: the live cap is the user's included_credits
+    // entitlement from Aether (see lib/cost/entitlementCap), used when Aether
+    // is unreachable or returns no entitlement
     freeMonthlyCredits: toInt(env.FREE_MONTHLY_CREDITS, 100),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 20),
