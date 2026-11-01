@@ -17,6 +17,7 @@ import { authenticateUser } from "lib/auth/authenticateUser";
 import { getAiConfig } from "lib/config/ai.config";
 import appConfig from "lib/config/app.config";
 import {
+  BILLING_BASE_URL,
   CORS_ALLOWED_ORIGINS,
   PORT,
   isDevEnv,
@@ -24,11 +25,16 @@ import {
 } from "lib/config/env.config";
 import { createSpendBreaker } from "lib/cost/breaker";
 import { createDrizzleCreditStore } from "lib/cost/creditStore.drizzle";
+import {
+  createEntitlementCapResolver,
+  createStaticCapResolver,
+} from "lib/cost/entitlementCap";
 import { createRateLimiter } from "lib/cost/rateLimit";
 import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
+import { billing } from "lib/providers";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
 
@@ -68,10 +74,24 @@ const aiRateLimiter = createRateLimiter({
   windowMs: aiConfig.rateLimitWindowMs,
   max: aiConfig.rateLimitMax,
 });
-const creditStore = createDrizzleCreditStore(
-  dbPool,
-  aiConfig.freeMonthlyCredits,
-);
+// The per-user monthly cap is tier-aware: it is the user's included_credits
+// entitlement for Facet from Aether, with the static free cap as a safe
+// fallback. When billing is not configured, degrade to the static cap so the
+// service still boots and enforces the free allowance (the billing webhook
+// that invalidates the entitlement cache warns separately when its secret is
+// unset)
+if (!BILLING_BASE_URL) {
+  console.warn(
+    "BILLING_BASE_URL not set, tier-aware credit caps disabled (static free cap)",
+  );
+}
+const capResolver = BILLING_BASE_URL
+  ? createEntitlementCapResolver({
+      billing,
+      fallbackCredits: aiConfig.freeMonthlyCredits,
+    })
+  : createStaticCapResolver(aiConfig.freeMonthlyCredits);
+const creditStore = createDrizzleCreditStore(dbPool, capResolver);
 
 /**
  * Elysia server.
