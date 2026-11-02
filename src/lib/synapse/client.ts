@@ -1,13 +1,18 @@
+import {
+  createSynapseClient,
+  estimateSynapseCostCents,
+} from "@omnidotdev/providers/ai";
+
 import { getAiConfig } from "lib/config/ai.config";
 
 /**
- * Thin client over the Synapse AI router's Anthropic-compatible
- * `POST {baseUrl}/v1/messages` endpoint.
+ * Facet's binding over the shared Synapse client (`@omnidotdev/providers/ai`).
  *
- * Uses the global `fetch` (no SDK, no node: imports) so it is trivially
- * mockable and carries no base-url friction. The server Synapse key is used by
- * default; a per-request BYOK key overrides it and is the only path a caller's
- * own key ever takes
+ * The request/parse logic now lives in the shared `createSynapseClient` (the
+ * fleet's one blessed `/v1/messages` wrapper); this module only binds it to
+ * Facet's config (base URL, model, rate, server key) and preserves the existing
+ * `callSynapse(input, options?)` surface so callers are unchanged. The server
+ * Synapse key is used by default; a per-request BYOK key overrides it
  */
 
 /** A single Anthropic-style conversation turn. */
@@ -52,16 +57,6 @@ export interface SynapseClientOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** Anthropic-compatible response shape (only the fields read here). */
-interface AnthropicResponseBody {
-  content?: { type?: string; text?: string }[];
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cost_cents?: number;
-  };
-}
-
 /** Pull config-backed defaults so callers can invoke with just an input. */
 const optionsFromConfig = (): SynapseClientOptions => {
   const cfg = getAiConfig();
@@ -75,83 +70,53 @@ const optionsFromConfig = (): SynapseClientOptions => {
   };
 };
 
-const estimateCostCents = (
-  inputTokens: number,
-  outputTokens: number,
-  opts: SynapseClientOptions,
-): number =>
-  (inputTokens / 1_000_000) * opts.inputCentsPerMTok +
-  (outputTokens / 1_000_000) * opts.outputCentsPerMTok;
-
 /**
- * Call Synapse's `/v1/messages`. Returns the concatenated text and a usage
- * record. Throws a generic, non-leaking error on a transport or non-2xx
- * failure; callers log the detail server-side and surface a safe message
+ * Call Synapse's `/v1/messages` via the shared client. Returns the concatenated
+ * text and a usage record (cost always resolved to a number, since Facet always
+ * configures a rate). Throws a generic, non-leaking error on failure
  */
 export const callSynapse = async (
   input: SynapseCallInput,
   options?: Partial<SynapseClientOptions>,
 ): Promise<SynapseResult> => {
   const opts: SynapseClientOptions = { ...optionsFromConfig(), ...options };
-  const doFetch = opts.fetchImpl ?? fetch;
-
-  const key = input.apiKey ?? opts.serverApiKey;
-  if (!key) {
-    // the managed path must be gated before here, this guards misuse
-    throw new Error("synapse request failed: no api key available");
-  }
-
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "x-api-key": key,
-    authorization: `Bearer ${key}`,
-    "anthropic-version": "2023-06-01",
+  const rate = {
+    inputCentsPerMTok: opts.inputCentsPerMTok,
+    outputCentsPerMTok: opts.outputCentsPerMTok,
   };
 
-  const payload = {
+  const client = createSynapseClient({
+    baseUrl: opts.baseUrl,
+    apiKey: opts.serverApiKey,
     model: opts.model,
-    max_tokens: input.maxTokens,
+    rate,
+    timeoutMs: opts.timeoutMs,
+    fetchImpl: opts.fetchImpl,
+  });
+
+  const result = await client.messages({
     system: input.system,
     messages: input.messages,
-  };
+    maxTokens: input.maxTokens,
+    apiKey: input.apiKey,
+  });
 
-  const controller = new AbortController();
-  const timeout = opts.timeoutMs
-    ? setTimeout(() => controller.abort(), opts.timeoutMs)
-    : undefined;
-
-  let res: Response;
-  try {
-    res = await doFetch(`${opts.baseUrl}/v1/messages`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : "transport error";
-    throw new Error(`synapse request failed: ${reason}`);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-
-  if (!res.ok) {
-    throw new Error(`synapse request failed: status ${res.status}`);
-  }
-
-  const data = (await res.json()) as AnthropicResponseBody;
-
-  const text = (data.content ?? [])
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("");
-
-  const inputTokens = data.usage?.input_tokens ?? 0;
-  const outputTokens = data.usage?.output_tokens ?? 0;
+  // The shared client returns null cost only without a rate; Facet always
+  // configures one, so this coercion keeps costCents a number for the meter
   const costCents =
-    typeof data.usage?.cost_cents === "number"
-      ? data.usage.cost_cents
-      : estimateCostCents(inputTokens, outputTokens, opts);
+    result.usage.costCents ??
+    estimateSynapseCostCents(
+      result.usage.inputTokens,
+      result.usage.outputTokens,
+      rate,
+    );
 
-  return { text, usage: { inputTokens, outputTokens, costCents } };
+  return {
+    text: result.text,
+    usage: {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      costCents,
+    },
+  };
 };
