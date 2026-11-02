@@ -34,6 +34,19 @@ interface GenerateDeps {
   authenticate: (request: Request) => Promise<{ userId: string } | null>;
   /** Per-user monthly credit meter for the managed path. */
   creditStore: CreditStore;
+  /**
+   * Optional events provider for fleet AI-usage telemetry. A successful
+   * generation emits `facet.generation.completed` (usage metadata only, never
+   * the prompt or code). Fire-and-forget: a failure never affects the response.
+   * Omitted in tests that do not assert on events
+   */
+  events?: {
+    emit: (event: {
+      type: string;
+      data: Record<string, unknown>;
+      subject?: string;
+    }) => Promise<unknown>;
+  };
 }
 
 interface GenerateBody {
@@ -184,6 +197,31 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         );
       }
     }
+
+    // 9. emit an AI-usage event for fleet analytics (fire-and-forget: never
+    // blocks or fails the response). Usage metadata only, no prompt or code
+    void deps.events
+      ?.emit({
+        type: "facet.generation.completed",
+        data: {
+          byok: Boolean(byokKey),
+          userId: userId ?? null,
+          model: cfg.model,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          costCents: result.usage.costCents,
+          credits,
+          repaired: attempt > 0,
+        },
+        ...(userId ? { subject: userId } : {}),
+      })
+      .catch((err: unknown) => {
+        logFailure(
+          `event emit failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      });
 
     return {
       code,

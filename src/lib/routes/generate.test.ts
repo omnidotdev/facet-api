@@ -16,13 +16,32 @@ const FENCED = `Here you go:\n\`\`\`ts\n${CODE}\n\`\`\``;
 type Caller = Parameters<typeof createGenerateRoute>[0]["callSynapse"];
 type Authenticate = Parameters<typeof createGenerateRoute>[0]["authenticate"];
 
+type Events = NonNullable<Parameters<typeof createGenerateRoute>[0]["events"]>;
+
 interface Overrides {
   caller?: Caller;
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
   creditStore?: CreditStore;
+  events?: Events;
 }
+
+/** Build an events stub that records every emitted event. */
+const makeEvents = () => {
+  const emitted: {
+    type: string;
+    data: Record<string, unknown>;
+    subject?: string;
+  }[] = [];
+  const events: Events = {
+    async emit(event) {
+      emitted.push(event);
+      return undefined;
+    },
+  };
+  return { events, emitted };
+};
 
 /**
  * In-memory CreditStore fake. Every user starts at `seedUsed` credits against a
@@ -86,6 +105,7 @@ const makeApp = (overrides: Overrides = {}) => {
         makeAuthenticator({ userId: "user-1" }).authenticate,
       // default to a generous cap so managed-path tests are not credit-blocked
       creditStore: overrides.creditStore ?? makeCreditStore().store,
+      events: overrides.events,
     }),
   );
 
@@ -134,6 +154,46 @@ describe("POST /generate", () => {
     // 1.4 cents -> ceil -> 2 credits
     expect(json.usage.credits).toBe(2);
     expect(json.usage.costCents).toBeCloseTo(1.4, 5);
+  });
+
+  test("emits facet.generation.completed with usage metadata (no prompt/code)", async () => {
+    const { events, emitted } = makeEvents();
+    const request = makeApp({ events });
+    const res = await request({ prompt: "a 10mm cube" });
+
+    expect(res.status).toBe(200);
+    // the emit is fire-and-forget, so let the microtask settle
+    await Promise.resolve();
+    expect(emitted).toHaveLength(1);
+    const event = emitted[0]!;
+    expect(event.type).toBe("facet.generation.completed");
+    expect(event.subject).toBe("user-1");
+    expect(event.data).toMatchObject({
+      byok: false,
+      userId: "user-1",
+      inputTokens: 100,
+      outputTokens: 50,
+      credits: 2,
+      repaired: false,
+    });
+    // never leak the prompt or the generated code into telemetry
+    const serialized = JSON.stringify(event.data);
+    expect(serialized).not.toContain("10mm cube");
+    expect(serialized).not.toContain(CODE);
+  });
+
+  test("a failed generation emits no event", async () => {
+    const { events, emitted } = makeEvents();
+    // a caller that returns no fenced block -> 422, so nothing should emit
+    const request = makeApp({
+      events,
+      caller: makeCaller("no code here").caller,
+    });
+    const res = await request({ prompt: "a 10mm cube" });
+
+    expect(res.status).toBe(422);
+    await Promise.resolve();
+    expect(emitted).toHaveLength(0);
   });
 
   test("rejects an empty prompt with a user-safe 400", async () => {
