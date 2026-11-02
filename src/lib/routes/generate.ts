@@ -35,6 +35,14 @@ interface GenerateDeps {
   /** Per-user monthly credit meter for the managed path. */
   creditStore: CreditStore;
   /**
+   * Optional per-user managed-key provisioner. When present, a managed call uses
+   * a per-user Synapse key (so Synapse attributes usage per user) instead of the
+   * shared server key. The local credit ledger still enforces the hard monthly
+   * cap, so this never widens the money-loss surface; a provisioning failure
+   * falls back to the shared key rather than blocking generation
+   */
+  provisioner?: { resolveKey: (userId: string) => Promise<string> };
+  /**
    * Optional events provider for fleet AI-usage telemetry. A successful
    * generation emits `facet.generation.completed` (usage metadata only, never
    * the prompt or code). Fire-and-forget: a failure never affects the response.
@@ -159,14 +167,31 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         ? [userTurn, ...buildRepairMessages(previous.code, previous.error)]
         : [userTurn];
 
-    // 6. call Synapse (never let provider detail reach the client)
+    // 5b. resolve a per-user managed key when provisioning is enabled, so Synapse
+    // attributes usage per user. The local ledger still hard-caps below; on any
+    // provisioning failure, fall back to the shared server key (never block)
+    let managedKey: string | undefined;
+    if (!byokKey && userId && deps.provisioner) {
+      try {
+        managedKey = await deps.provisioner.resolveKey(userId);
+      } catch (err) {
+        logFailure(
+          `per-user key provisioning failed, using shared key: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      }
+    }
+
+    // 6. call Synapse (never let provider detail reach the client). A BYOK key
+    // wins; else the per-user managed key when provisioned; else the shared key
     let result: Awaited<ReturnType<typeof callSynapse>>;
     try {
       result = await deps.callSynapse({
         system: buildSystemPrompt(),
         messages,
         maxTokens: cfg.maxOutputTokens,
-        apiKey: byokKey,
+        apiKey: byokKey ?? managedKey,
       });
     } catch (err) {
       logFailure(err instanceof Error ? err.message : "unknown upstream error");

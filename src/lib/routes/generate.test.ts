@@ -25,6 +25,7 @@ interface Overrides {
   authenticate?: Authenticate;
   creditStore?: CreditStore;
   events?: Events;
+  provisioner?: { resolveKey: (userId: string) => Promise<string> };
 }
 
 /** Build an events stub that records every emitted event. */
@@ -106,6 +107,7 @@ const makeApp = (overrides: Overrides = {}) => {
       // default to a generous cap so managed-path tests are not credit-blocked
       creditStore: overrides.creditStore ?? makeCreditStore().store,
       events: overrides.events,
+      provisioner: overrides.provisioner,
     }),
   );
 
@@ -180,6 +182,41 @@ describe("POST /generate", () => {
     const serialized = JSON.stringify(event.data);
     expect(serialized).not.toContain("10mm cube");
     expect(serialized).not.toContain(CODE);
+  });
+
+  test("per-user managed key: provisioned key is used for Synapse AND the ledger still meters", async () => {
+    const { caller, calls } = makeCaller(FENCED);
+    const { store, spendCalls } = makeCreditStore();
+    const request = makeApp({
+      caller,
+      creditStore: store,
+      provisioner: { resolveKey: async (u) => `sk-${u}` },
+    });
+
+    const res = await request({ prompt: "a 10mm cube" });
+    expect(res.status).toBe(200);
+    // the per-user key reached Synapse (not the shared server key)
+    expect(calls[0]!.apiKey).toBe("sk-user-1");
+    // the local credit ledger STILL enforced/metered (hard-cap safety net)
+    expect(spendCalls).toHaveLength(1);
+    expect(spendCalls[0]!.userId).toBe("user-1");
+  });
+
+  test("per-user provisioning failure falls back to the shared key and still succeeds", async () => {
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({
+      caller,
+      provisioner: {
+        resolveKey: async () => {
+          throw new Error("synapse-api down");
+        },
+      },
+    });
+
+    const res = await request({ prompt: "a 10mm cube" });
+    expect(res.status).toBe(200);
+    // fell back to the shared server key (undefined apiKey -> client uses server key)
+    expect(calls[0]!.apiKey).toBeUndefined();
   });
 
   test("a failed generation emits no event", async () => {

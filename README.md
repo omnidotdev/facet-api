@@ -64,6 +64,8 @@ The service boots with nothing set. Every variable is optional; the managed path
 | --- | --- | --- |
 | `SYNAPSE_BASE_URL` | `http://localhost:6000` | Synapse AI router base URL. |
 | `SYNAPSE_API_KEY` | _(unset)_ | Server-side Synapse key. Unset disables the managed path (BYOK still works). Never shipped to the browser. |
+| `SYNAPSE_API_URL` | _(unset)_ | Synapse provisioning API (api.synapse, not the gateway). With `SYNAPSE_GATEWAY_SECRET`, enables per-user managed keys. |
+| `SYNAPSE_GATEWAY_SECRET` | _(unset)_ | Gateway secret for the internal provisioning call. With `SYNAPSE_API_URL`, enables per-user managed keys (additive; the credit ledger still hard-caps). |
 | `FACET_AI_MODEL` | `claude-sonnet-5-5` | Claude model id passed through to Synapse. |
 | `MAX_PROMPT_CHARS` | `2000` | Maximum accepted prompt length. |
 | `MAX_OUTPUT_TOKENS` | `2048` | Output token ceiling per call. |
