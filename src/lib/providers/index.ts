@@ -35,7 +35,9 @@ export const events = createEventsProvider(
         provider: "http",
         baseUrl: VORTEX_API_URL,
         apiKey: VORTEX_API_KEY,
-        source: "platform",
+        // CloudEvents source identifies the product (omni.<product>), not the
+        // deployment unit; event types are facet.<entity>.<action>
+        source: "omni.facet",
       }
     : {},
 );

@@ -34,7 +34,7 @@ import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
-import { billing } from "lib/providers";
+import { billing, events } from "lib/providers";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
 
@@ -164,6 +164,7 @@ const app = new Elysia({
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
       creditStore,
+      events,
     }),
   )
   .use(webhooks)
