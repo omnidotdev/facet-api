@@ -61,6 +61,16 @@ interface AiConfig {
   synapseBaseUrl: string;
   /** Server-side Synapse key, undefined when the managed path is disabled. */
   synapseApiKey: string | undefined;
+  /** Synapse provisioning API base URL (api.synapse, not the gateway), for per-user managed keys. */
+  synapseApiUrl: string | undefined;
+  /** Gateway secret authorizing the internal provisioning call. */
+  synapseGatewaySecret: string | undefined;
+  /**
+   * Whether per-user managed keys are enabled. When true, the managed path
+   * provisions a per-user Synapse key so Synapse attributes usage per user;
+   * the local credit ledger still enforces the hard monthly cap as a safety net
+   */
+  perUserManagedEnabled: boolean;
   /** Claude model id passed through to Synapse. */
   model: string;
   /** Spend rate for the active model. */
@@ -95,11 +105,16 @@ export const getAiConfig = (): AiConfig => {
     env.SYNAPSE_BASE_URL ?? "http://localhost:6000"
   ).replace(/\/+$/, "");
   const synapseApiKey = env.SYNAPSE_API_KEY || undefined;
+  const synapseApiUrl = env.SYNAPSE_API_URL?.replace(/\/+$/, "") || undefined;
+  const synapseGatewaySecret = env.SYNAPSE_GATEWAY_SECRET || undefined;
   const model = env.FACET_AI_MODEL ?? DEFAULT_MODEL;
 
   return {
     synapseBaseUrl,
     synapseApiKey,
+    synapseApiUrl,
+    synapseGatewaySecret,
+    perUserManagedEnabled: Boolean(synapseApiUrl && synapseGatewaySecret),
     model,
     rate: rateForModel(model),
     managedEnabled: Boolean(synapseApiKey),

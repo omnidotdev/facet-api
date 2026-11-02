@@ -37,6 +37,7 @@ import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
+import { SynapseProvisioner } from "lib/synapse/provisioner";
 
 const commit = (() => {
   try {
@@ -92,6 +93,19 @@ const capResolver = BILLING_BASE_URL
     })
   : createStaticCapResolver(aiConfig.freeMonthlyCredits);
 const creditStore = createDrizzleCreditStore(dbPool, capResolver);
+// Per-user managed keys: when the provisioning API URL + gateway secret are set,
+// the managed path provisions a per-user Synapse key so Synapse attributes usage
+// per user. The local credit ledger above still enforces the hard cap, so this
+// is purely additive. Disabled (shared key) when either env is unset
+const provisioner =
+  aiConfig.perUserManagedEnabled &&
+  aiConfig.synapseApiUrl &&
+  aiConfig.synapseGatewaySecret
+    ? new SynapseProvisioner({
+        apiUrl: aiConfig.synapseApiUrl,
+        gatewaySecret: aiConfig.synapseGatewaySecret,
+      })
+    : undefined;
 
 /**
  * Elysia server.
@@ -165,6 +179,7 @@ const app = new Elysia({
       authenticate: authenticateUser,
       creditStore,
       events,
+      provisioner,
     }),
   )
   .use(webhooks)
