@@ -69,6 +69,22 @@ const API_SPEC: ApiGroup[] = [
     ],
   },
   {
+    heading: "Composite helpers (free functions built from the ops above)",
+    entries: [
+      {
+        signature:
+          "grid(shape: Shape, nx: number, ny: number, spacing: number | [sx, sy]): Shape",
+        summary:
+          "Tile a shape into a centered nx by ny grid on the XY plane (a union of copies). Prefer this over writing the copies by hand.",
+      },
+      {
+        signature: "rectTube(outer: [ox, oy], wall: number, h: number): Shape",
+        summary:
+          "A hollow rectangular tube/frame: an [ox, oy] footprint with wall-thick walls, h tall, centered.",
+      },
+    ],
+  },
+  {
     heading: "Live parameters (build sliders; read while the model runs)",
     entries: [
       {
