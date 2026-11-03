@@ -206,8 +206,12 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       return { error: MESSAGES.noCode };
     }
 
-    // 8. meter managed spend only (BYOK is billed to the caller)
-    const credits = Math.ceil(result.usage.costCents);
+    // 8. meter managed spend only (BYOK is billed to the caller). A credit is a
+    // retail unit, not raw cost: debit real cents times the COGS markup, so the
+    // monthly allowance carries gross margin over model spend. The spend breaker
+    // (below) still tracks REAL cents, so the absolute money-safety ceiling is
+    // unaffected by the markup
+    const credits = Math.ceil(result.usage.costCents * cfg.creditCogsMarkup);
     if (!byokKey && userId) {
       deps.breaker.record(result.usage.costCents);
       // the spend already happened upstream, so a meter write failure must not

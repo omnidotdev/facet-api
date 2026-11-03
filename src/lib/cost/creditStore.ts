@@ -3,8 +3,9 @@
  *
  * The managed generation path is hard-capped with no overage: a free user can
  * never run up a bill. Usage is keyed on the current UTC month, so the cap
- * resets at the month boundary. 1 credit maps to roughly 1 US cent of model
- * spend; a generation costs `ceil(costCents)` credits.
+ * resets at the month boundary. A credit is a retail unit, not raw cost: a
+ * generation costs `ceil(costCents * markup)` credits (see the COGS markup in
+ * ai.config), so the monthly allowance carries gross margin over model spend.
  *
  * The interface is injected like the breaker so the enforcement logic is
  * testable with an in-memory fake, with no database. The Drizzle-backed
