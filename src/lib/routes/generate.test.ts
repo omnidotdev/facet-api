@@ -126,6 +126,7 @@ const ENV_KEYS = [
   "MAX_PROMPT_CHARS",
   "MAX_OUTPUT_TOKENS",
   "MAX_REPAIR_ATTEMPTS",
+  "CREDIT_COGS_MARKUP",
 ] as const;
 let snapshot: Record<string, string | undefined> = {};
 
@@ -153,9 +154,34 @@ describe("POST /generate", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.code).toBe(CODE);
-    // 1.4 cents -> ceil -> 2 credits
-    expect(json.usage.credits).toBe(2);
+    // 1.4 cents * 2.0 markup -> ceil -> 3 credits (a credit is a retail unit)
+    expect(json.usage.credits).toBe(3);
     expect(json.usage.costCents).toBeCloseTo(1.4, 5);
+  });
+
+  test("a credit is a retail unit: debits ceil(costCents * markup), breaker tracks real cents", async () => {
+    const { caller } = makeCaller(FENCED, 5); // 5 cents of real model spend
+    const { store, spendCalls } = makeCreditStore();
+    const breaker = createSpendBreaker(500);
+    const request = makeApp({ caller, creditStore: store, breaker });
+
+    const res = await request({ prompt: "a 10mm cube" });
+    expect(res.status).toBe(200);
+    // default markup is 2.0, so 5 real cents bills 10 credits to the ledger
+    expect(spendCalls).toEqual([{ userId: "user-1", credits: 10 }]);
+    // the money-safety breaker records REAL cents, never the marked-up credits
+    expect(breaker.spentTodayCents()).toBe(5);
+  });
+
+  test("CREDIT_COGS_MARKUP overrides the markup (1.0 bills at cost)", async () => {
+    process.env.CREDIT_COGS_MARKUP = "1";
+    const { caller } = makeCaller(FENCED, 5);
+    const { store, spendCalls } = makeCreditStore();
+    const request = makeApp({ caller, creditStore: store });
+
+    const res = await request({ prompt: "a 10mm cube" });
+    expect(res.status).toBe(200);
+    expect(spendCalls).toEqual([{ userId: "user-1", credits: 5 }]);
   });
 
   test("emits facet.generation.completed with usage metadata (no prompt/code)", async () => {
@@ -175,7 +201,7 @@ describe("POST /generate", () => {
       userId: "user-1",
       inputTokens: 100,
       outputTokens: 50,
-      credits: 2,
+      credits: 3,
       repaired: false,
     });
     // never leak the prompt or the generated code into telemetry
@@ -343,14 +369,14 @@ describe("POST /generate", () => {
   test("managed success records the spent credits against the user", async () => {
     const { store, getCalls, spendCalls } = makeCreditStore(1000, 0);
     const { authenticate } = makeAuthenticator({ userId: "user-42" });
-    // 3 cents -> ceil -> 3 credits
+    // 3 cents * 2.0 markup -> ceil -> 6 credits
     const { caller } = makeCaller(FENCED, 3);
     const request = makeApp({ caller, authenticate, creditStore: store });
     const res = await request({ prompt: "a cube" });
 
     expect(res.status).toBe(200);
     expect(getCalls).toEqual(["user-42"]);
-    expect(spendCalls).toEqual([{ userId: "user-42", credits: 3 }]);
+    expect(spendCalls).toEqual([{ userId: "user-42", credits: 6 }]);
   });
 
   test("BYOK path never touches the credit meter", async () => {

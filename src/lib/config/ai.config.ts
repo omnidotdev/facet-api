@@ -56,6 +56,25 @@ const toInt = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const toFloat = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+/**
+ * Markup applied when converting real model spend (cents) into billable credits.
+ *
+ * A credit is a retail unit, not raw cost: one generation debits
+ * `ceil(costCents * markup)` credits, so a tier's included allowance carries
+ * gross margin over model spend. The default 2.0 yields ~50% gross margin on all
+ * managed AI (the standard 1.3-3x range for resold inference), tunable per
+ * deployment via `CREDIT_COGS_MARKUP`. This is the Omni fleet credit-economics
+ * standard; the eventual home is @omnidotdev/providers so every product that
+ * meters AI usage inherits one definition. The spend breaker still tracks REAL
+ * cents, so the absolute money-safety ceiling is independent of this markup
+ */
+const DEFAULT_CREDIT_COGS_MARKUP = 2;
+
 interface AiConfig {
   /** Synapse base URL, without a trailing slash. */
   synapseBaseUrl: string;
@@ -89,6 +108,8 @@ interface AiConfig {
   dailySpendCeilingCents: number;
   /** Static fallback cap for managed credits per UTC month, used when Aether has no entitlement or is unreachable. */
   freeMonthlyCredits: number;
+  /** Markup from real model cents to billable credits (retail unit); see DEFAULT_CREDIT_COGS_MARKUP. */
+  creditCogsMarkup: number;
   /** Per-IP rate limit window in milliseconds. */
   rateLimitWindowMs: number;
   /** Maximum requests per IP per window. */
@@ -127,6 +148,10 @@ export const getAiConfig = (): AiConfig => {
     // entitlement from Aether (see lib/cost/entitlementCap), used when Aether
     // is unreachable or returns no entitlement
     freeMonthlyCredits: toInt(env.FREE_MONTHLY_CREDITS, 100),
+    creditCogsMarkup: toFloat(
+      env.CREDIT_COGS_MARKUP,
+      DEFAULT_CREDIT_COGS_MARKUP,
+    ),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 20),
   };
