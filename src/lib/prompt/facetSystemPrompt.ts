@@ -77,6 +77,18 @@ const API_SPEC: ApiGroup[] = [
         summary:
           "Register a numeric parameter and return its current value, in mm or the model's own unit.",
       },
+      {
+        signature:
+          "param.boolean(name: string, opts?: { default?: boolean }): boolean",
+        summary:
+          "Register a boolean parameter (renders a checkbox) and return its current value. Prefer this over a 0/1 slider for toggles.",
+      },
+      {
+        signature:
+          "param.enum(name: string, opts: { options: string[]; default?: string }): string",
+        summary:
+          "Register a choice parameter (renders a dropdown) and return the selected option string. param.select is an alias. Prefer this over an index slider for a fixed set of choices.",
+      },
     ],
   },
   {
@@ -137,6 +149,22 @@ const API_SPEC: ApiGroup[] = [
 
 /** Curated prompt -> code examples drawn from facet-app src/examples.ts. */
 const FEW_SHOT: { prompt: string; code: string }[] = [
+  {
+    prompt:
+      "A 30mm block with an optional through-hole toggle and a square-or-hex profile chosen from a dropdown.",
+    code: `const hollow = param.boolean("hollow", { default: true });
+const profile = param.enum("profile", { options: ["square", "hex"], default: "square" });
+
+const size = 30;
+let base =
+  profile === "hex"
+    ? cylinder(size / 2, size, { segments: 6 })
+    : cube(size);
+if (hollow) {
+  base = base.subtract(cylinder(3, size + 2, { segments: 48 }));
+}
+return base;`,
+  },
   {
     prompt:
       "A 50 x 34 x 12 mm plate with a 6mm-radius hole through it, all driven by sliders.",
