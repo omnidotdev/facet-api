@@ -26,29 +26,41 @@ import type { TestDatabase } from "test/setup/createTestDatabase";
 // cannot catch SQL regressions (the month-key filter, the coalesce(sum) and its
 // string->number coercion), so exercise the real queries against Postgres here.
 //
-// Needs Docker for a throwaway Postgres; skip cleanly where it is unavailable so
-// the suite still passes on a machine or CI runner without it
-const hasDocker = Bun.spawnSync({ cmd: ["docker", "info"] }).exitCode === 0;
+// Connect to a Postgres provided by CI (TEST_DATABASE_URL, a `services:` block)
+// when present; otherwise spin up a throwaway container with Docker for local
+// runs. Skip cleanly when neither exists so the suite still passes without it
+const envDbUrl = process.env.TEST_DATABASE_URL;
+const hasDocker =
+  !envDbUrl && Bun.spawnSync({ cmd: ["docker", "info"] }).exitCode === 0;
+const canRun = Boolean(envDbUrl) || hasDocker;
 
 /** A timestamp inside a given UTC month, for the month-boundary fixtures. */
 const at = (iso: string) => new Date(iso).getTime();
 
-describe.skipIf(!hasDocker)("createDrizzleCreditStore (Postgres)", () => {
+describe.skipIf(!canRun)("createDrizzleCreditStore (Postgres)", () => {
   let ctx: TestDatabase;
+  let startedContainer = false;
   // A static cap, so these tests exercise the ledger SQL rather than the Aether
   // entitlement path (covered separately in entitlementCap.test.ts)
   const cap: CapResolver = async () => 100;
   const store = () => createDrizzleCreditStore(ctx.db, cap);
 
   beforeAll(async () => {
-    const container = await startPostgresContainer();
-    ctx = await createTestDatabase(container.getConnectionUri());
+    let uri = envDbUrl;
+    if (!uri) {
+      const container = await startPostgresContainer();
+      startedContainer = true;
+      uri = container.getConnectionUri();
+    }
+    ctx = await createTestDatabase(uri);
   });
 
   afterAll(async () => {
     await ctx?.cleanup();
-    await stopPostgresContainer();
-    await cleanupOrphanedContainers();
+    if (startedContainer) {
+      await stopPostgresContainer();
+      await cleanupOrphanedContainers();
+    }
   });
 
   beforeEach(async () => {
