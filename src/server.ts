@@ -6,6 +6,7 @@ import { useOpenTelemetry } from "@envelop/opentelemetry";
 import { useParserCache } from "@envelop/parser-cache";
 import { useValidationCache } from "@envelop/validation-cache";
 import { useDisableIntrospection } from "@graphql-yoga/plugin-disable-introspection";
+import { createSynapseProvisioner } from "@omnidotdev/providers/ai";
 import { sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 import { rateLimit } from "elysia-rate-limit";
@@ -37,7 +38,6 @@ import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
-import { SynapseProvisioner } from "lib/synapse/provisioner";
 
 const commit = (() => {
   try {
@@ -105,9 +105,10 @@ const provisioner =
   aiConfig.perUserManagedEnabled &&
   aiConfig.synapseApiUrl &&
   aiConfig.synapseGatewaySecret
-    ? new SynapseProvisioner({
+    ? createSynapseProvisioner({
         apiUrl: aiConfig.synapseApiUrl,
         gatewaySecret: aiConfig.synapseGatewaySecret,
+        source: "Facet",
       })
     : undefined;
 

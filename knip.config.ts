@@ -31,8 +31,6 @@ const knipConfig: KnipConfig = {
     "src/lib/providers/**",
   ],
   ignoreDependencies: [
-    // GitHub dependency not resolvable by knip
-    "@omnidotdev/providers",
     "@changesets/changelog-github",
     "@changesets/cli",
     "drizzle-kit",
