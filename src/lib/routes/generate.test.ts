@@ -222,7 +222,7 @@ describe("POST /generate", () => {
     // default markup is 2.0, so 5 real cents bills 10 credits to the ledger
     expect(spendCalls).toEqual([{ userId: "user-1", credits: 10 }]);
     // the money-safety breaker records REAL cents, never the marked-up credits
-    expect(breaker.spentTodayCents()).toBe(5);
+    expect(await breaker.spentTodayCents()).toBe(5);
   });
 
   test("CREDIT_COGS_MARKUP overrides the markup (1.0 bills at cost)", async () => {
@@ -344,7 +344,7 @@ describe("POST /generate", () => {
 
   test("returns 503 when the daily breaker is tripped (managed path)", async () => {
     const breaker = createSpendBreaker(100);
-    breaker.record(100);
+    await breaker.record(100);
     const { caller, calls } = makeCaller(FENCED);
     const request = makeApp({ caller, breaker });
     const res = await request({ prompt: "a cube" });
@@ -356,7 +356,7 @@ describe("POST /generate", () => {
   test("BYOK path bypasses the breaker and the managed-disabled check", async () => {
     process.env.SYNAPSE_API_KEY = "";
     const breaker = createSpendBreaker(100);
-    breaker.record(100); // tripped
+    await breaker.record(100); // tripped
     const { caller, calls } = makeCaller(FENCED);
     const request = makeApp({ caller, breaker });
     const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
@@ -365,7 +365,7 @@ describe("POST /generate", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.apiKey).toBe("byok-xyz");
     // BYOK spend is not recorded against our breaker
-    expect(breaker.spentTodayCents()).toBe(100);
+    expect(await breaker.spentTodayCents()).toBe(100);
   });
 
   test("managed path with no identity returns a generic 401 and never calls Synapse", async () => {
@@ -451,7 +451,7 @@ describe("POST /generate", () => {
 
     expect(res.status).toBe(200);
     expect(calls[0]!.apiKey).toBeUndefined();
-    expect(breaker.spentTodayCents()).toBe(3);
+    expect(await breaker.spentTodayCents()).toBe(3);
   });
 
   test("returns 422 when the model emits no fenced code block", async () => {

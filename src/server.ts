@@ -23,13 +23,13 @@ import {
   isDevEnv,
   isProdEnv,
 } from "lib/config/env.config";
-import { createSpendBreaker } from "lib/cost/breaker";
 import { createDrizzleCreditStore } from "lib/cost/creditStore.drizzle";
 import {
   createEntitlementCapResolver,
   createStaticCapResolver,
 } from "lib/cost/entitlementCap";
 import { createRateLimiter } from "lib/cost/rateLimit";
+import { createDrizzleSpendBreaker } from "lib/cost/spendBreaker.drizzle";
 import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
@@ -60,17 +60,21 @@ try {
 }
 
 // AI gateway singletons.
-// The per-user credit meter is DB-backed (durable across instances and
-// restarts). The global daily breaker and per-IP rate limiter stay in-memory:
-// DB-backing them cleanly needs atomic counters and a shared window, which is
-// more than a small change, and the Synapse-key hard budget plus the per-user
-// cap already bound worst-case loss. Moving them to a shared store is the
-// remaining Phase C work (see the TODOs in breaker.ts and rateLimit.ts)
+// The per-user credit meter and the global daily spend breaker are both
+// DB-backed (durable across instances and restarts); the breaker's shared daily
+// counter holds the ceiling even across a restart or multiple replicas. The
+// per-IP rate limiter stays in-memory: a sliding window across instances needs
+// a shared store, and the Synapse-key hard budget plus the per-user cap and the
+// durable breaker already bound worst-case loss. Moving the limiter to a shared
+// store is the remaining Phase C work (see the TODO in rateLimit.ts)
 const aiConfig = getAiConfig();
 if (!aiConfig.managedEnabled) {
   console.warn("SYNAPSE_API_KEY not set, managed AI generation disabled");
 }
-const spendBreaker = createSpendBreaker(aiConfig.dailySpendCeilingCents);
+const spendBreaker = createDrizzleSpendBreaker(
+  dbPool,
+  aiConfig.dailySpendCeilingCents,
+);
 const aiRateLimiter = createRateLimiter({
   windowMs: aiConfig.rateLimitWindowMs,
   max: aiConfig.rateLimitMax,

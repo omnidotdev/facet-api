@@ -3,32 +3,36 @@
  *
  * Tracks aggregate managed model spend per UTC day and trips once a configured
  * ceiling is reached, so a bug or abuse upstream cannot run spend past a known
- * bound. In-memory: process-local and reset on restart.
+ * bound. Real cents, never marked-up credits: this is the absolute money-safety
+ * ceiling below the per-user credit meter.
  *
- * Phase C left this in-memory on purpose. The per-user credit meter is the
- * DB-backed layer; this breaker is a coarse global backstop, and backing it
- * cleanly needs an atomic shared daily counter. Worst-case loss is already
- * bounded by the Synapse-key hard budget and the per-user cap.
- * TODO: back this with a shared store (DB or Redis) so the ceiling holds across
- * instances and restarts
+ * The interface is injected like the credit store so the enforcement logic is
+ * testable with an in-memory fake, with no database. Two implementations sit
+ * behind it: the in-memory one here (used in tests, and as a DB-less fallback),
+ * and the durable Postgres-backed one in `spendBreaker.drizzle.ts`, whose
+ * shared daily counter holds the ceiling across instances and restarts.
  */
 
 export interface SpendBreaker {
   /** Whether spend has reached the ceiling for the current UTC day. */
-  isTripped(nowMs?: number): boolean;
+  isTripped(nowMs?: number): Promise<boolean>;
   /** Add spend (US cents) to the current UTC day. */
-  record(cents: number, nowMs?: number): void;
+  record(cents: number, nowMs?: number): Promise<void>;
   /** Spend recorded so far for the current UTC day, in US cents. */
-  spentTodayCents(nowMs?: number): number;
+  spentTodayCents(nowMs?: number): Promise<number>;
 }
 
 /** UTC day key, e.g. "2026-10-31". */
-const utcDayKey = (nowMs: number): string =>
+export const utcDayKey = (nowMs: number): string =>
   new Date(nowMs).toISOString().slice(0, 10);
 
 /**
  * Create an in-memory daily spend breaker. A ceiling of zero or less disables
- * the breaker (it never trips); the config layer never produces such a value
+ * the breaker (it never trips); the config layer never produces such a value.
+ *
+ * Process-local and reset on restart, so the ceiling does not hold across
+ * instances: use `createDrizzleSpendBreaker` wherever the DB is available. This
+ * fake exists for tests and as a safe fallback when the database is unreachable
  */
 export const createSpendBreaker = (ceilingCents: number): SpendBreaker => {
   let day = "";
@@ -45,15 +49,15 @@ export const createSpendBreaker = (ceilingCents: number): SpendBreaker => {
   const now = () => Date.now();
 
   return {
-    spentTodayCents(nowMs = now()) {
+    async spentTodayCents(nowMs = now()) {
       rollover(nowMs);
       return cents;
     },
-    record(amount, nowMs = now()) {
+    async record(amount, nowMs = now()) {
       rollover(nowMs);
       if (amount > 0) cents += amount;
     },
-    isTripped(nowMs = now()) {
+    async isTripped(nowMs = now()) {
       if (ceilingCents <= 0) return false;
       rollover(nowMs);
       return cents >= ceilingCents;

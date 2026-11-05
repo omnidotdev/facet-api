@@ -138,7 +138,7 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         : undefined;
     let userId: string | undefined;
     if (!byokKey) {
-      if (!cfg.managedEnabled || deps.breaker.isTripped()) {
+      if (!cfg.managedEnabled || (await deps.breaker.isTripped())) {
         set.status = 503;
         return { error: MESSAGES.unavailable };
       }
@@ -226,9 +226,17 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     // unaffected by the markup
     const credits = Math.ceil(result.usage.costCents * cfg.creditCogsMarkup);
     if (!byokKey && userId) {
-      deps.breaker.record(result.usage.costCents);
-      // the spend already happened upstream, so a meter write failure must not
-      // fail the response or lose the user's code; log and fall through
+      // the spend already happened upstream, so a breaker or meter write failure
+      // must not fail the response or lose the user's code; log and fall through
+      try {
+        await deps.breaker.record(result.usage.costCents);
+      } catch (err) {
+        logFailure(
+          `breaker record failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      }
       try {
         await deps.creditStore.recordSpend(userId, credits);
       } catch (err) {
