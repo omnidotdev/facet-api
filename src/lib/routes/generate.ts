@@ -72,8 +72,7 @@ const MESSAGES = {
     "Too many repair attempts. Please adjust your prompt and try again.",
   unauthorized:
     "Sign in to use managed AI generation, or provide your own key.",
-  notAllowed:
-    "Managed AI generation is in limited preview. Add your own Synapse key to generate.",
+  notAllowed: "Managed AI generation is in limited preview.",
   overCap:
     "You have used all of your AI credits for this month. Upgrade for more, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
