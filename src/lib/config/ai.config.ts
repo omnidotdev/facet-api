@@ -114,6 +114,14 @@ interface AiConfig {
   rateLimitWindowMs: number;
   /** Maximum requests per IP per window. */
   rateLimitMax: number;
+  /**
+   * Allowlist of Omni user ids permitted to use the managed (our-key) path.
+   * When non-empty, every other signed-in user is refused the managed path and
+   * must use BYOK, so only these users can ever spend our Synapse key. Empty
+   * means no restriction. The ids live ONLY in this env var, never in code or
+   * git, so no personal identifier is ever committed
+   */
+  managedAllowlist: string[];
 }
 
 /**
@@ -154,5 +162,9 @@ export const getAiConfig = (): AiConfig => {
     ),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMax: toInt(env.RATE_LIMIT_MAX, 20),
+    managedAllowlist: (env.FACET_MANAGED_ALLOWLIST ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0),
   };
 };
