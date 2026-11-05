@@ -127,6 +127,7 @@ const ENV_KEYS = [
   "MAX_OUTPUT_TOKENS",
   "MAX_REPAIR_ATTEMPTS",
   "CREDIT_COGS_MARKUP",
+  "FACET_MANAGED_ALLOWLIST",
 ] as const;
 let snapshot: Record<string, string | undefined> = {};
 
@@ -157,6 +158,57 @@ describe("POST /generate", () => {
     // 1.4 cents * 2.0 markup -> ceil -> 3 credits (a credit is a retail unit)
     expect(json.usage.credits).toBe(3);
     expect(json.usage.costCents).toBeCloseTo(1.4, 5);
+  });
+
+  describe("managed allowlist (limited preview)", () => {
+    test("refuses a signed-in user who is not on the allowlist", async () => {
+      process.env.FACET_MANAGED_ALLOWLIST = "owner-123, owner-456";
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        authenticate: makeAuthenticator({ userId: "random-user" }).authenticate,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(403);
+      // the managed key is never spent for a non-allowlisted user
+      expect(calls).toHaveLength(0);
+    });
+
+    test("allows a user who is on the allowlist", async () => {
+      process.env.FACET_MANAGED_ALLOWLIST = "owner-123, random-user";
+      const request = makeApp({
+        authenticate: makeAuthenticator({ userId: "random-user" }).authenticate,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+    });
+
+    test("does not restrict anyone when the allowlist is unset", async () => {
+      // no FACET_MANAGED_ALLOWLIST set
+      const request = makeApp({
+        authenticate: makeAuthenticator({ userId: "anyone" }).authenticate,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+    });
+
+    test("BYOK bypasses the allowlist entirely (caller's own key, no cost to us)", async () => {
+      process.env.FACET_MANAGED_ALLOWLIST = "owner-123";
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller });
+
+      const res = await request({ prompt: "a cube", byokKey: "sk-user-key" });
+
+      expect(res.status).toBe(200);
+      // BYOK forwards the caller's key, not ours
+      expect(calls[0]?.apiKey).toBe("sk-user-key");
+    });
   });
 
   test("a credit is a retail unit: debits ceil(costCents * markup), breaker tracks real cents", async () => {

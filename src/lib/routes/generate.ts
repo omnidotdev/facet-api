@@ -72,6 +72,8 @@ const MESSAGES = {
     "Too many repair attempts. Please adjust your prompt and try again.",
   unauthorized:
     "Sign in to use managed AI generation, or provide your own key.",
+  notAllowed:
+    "Managed AI generation is in limited preview. Add your own Synapse key to generate.",
   overCap:
     "You have used all of your AI credits for this month. Upgrade for more, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
@@ -148,6 +150,17 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         return { error: MESSAGES.unauthorized };
       }
       userId = identity.userId;
+
+      // limited-preview gate: when an allowlist is configured, only listed users
+      // may spend our managed key; everyone else must use their own key (BYOK).
+      // The ids live only in env (FACET_MANAGED_ALLOWLIST), never in code
+      if (
+        cfg.managedAllowlist.length > 0 &&
+        !cfg.managedAllowlist.includes(userId)
+      ) {
+        set.status = 403;
+        return { error: MESSAGES.notAllowed };
+      }
 
       // enforce the per-user hard monthly credit cap before any spend
       const usage = await deps.creditStore.getMonthlyUsage(userId);
