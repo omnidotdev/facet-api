@@ -47,7 +47,8 @@ const API_SPEC: ApiGroup[] = [
       {
         signature:
           "cylinder(r = 1, h = 1, opts?: { center?: boolean; segments?: number }): Shape",
-        summary: "A cylinder of radius r mm and height h mm.",
+        summary:
+          "A cylinder of radius r mm and height h mm. A low `segments` count makes a regular polygonal prism (segments: 6 for a hexagon/hex nut, 8 for an octagon); a high count (the default 32) reads as round. This holds in both the mesh and the exact B-rep kernel.",
       },
     ],
   },
@@ -258,6 +259,9 @@ Output contract (strict):
 - All lengths are in millimeters (mm); all angles are in degrees.
 - Use only the API documented below. Do not invent functions or methods.
 - fillet, chamfer and shell are exact-geometry (B-rep) operations; the Studio switches to the exact kernel automatically when they are used.
+- For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
+- Expose the key dimensions the user names as parameters (param.number / param.boolean / param.enum) with sensible min/max/default in mm, so the model is adjustable. Compute derived values from them.
+- Keep it simple and correct: a model that builds and clearly matches the request beats an elaborate one that may fail. Do not add features the user did not ask for.
 
 Facet API:
 ${renderApiSpec()}
