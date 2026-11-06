@@ -47,6 +47,24 @@ const DEFAULT_MODEL_RATE: ModelRate = {
 // with FACET_AI_MODEL (e.g. anthropic/claude-opus-4-6) for maximum quality
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-5-20250929";
 
+// The default is now Synapse smart routing: the virtual `auto` model lets the
+// gateway pick the best/cheapest model per request (a free COGS win, since the
+// spend breaker still tracks real cents). If the gateway refuses the virtual
+// model for this key (not entitled, or an unknown id), callSynapse degrades to
+// the concrete fallback below, so routing can never break generation. Override
+// the routed model with FACET_AI_MODEL and the concrete fallback with
+// FACET_AI_FALLBACK_MODEL
+const DEFAULT_ROUTED_MODEL = "auto";
+
+// Synapse's provider-agnostic virtual models (unprefixed). A failure on one of
+// these is treated as a routing/entitlement miss and degrades to the fallback;
+// a concrete model's failure is a real error and is not retried
+const VIRTUAL_MODELS = new Set(["auto", "best", "fast", "cheap"]);
+
+/** Whether a model id is a Synapse virtual (smart-routed) model. */
+export const isVirtualModel = (model: string): boolean =>
+  VIRTUAL_MODELS.has(model.toLowerCase());
+
 /** Resolve the spend rate for a model, falling back to a conservative default. */
 const rateForModel = (model: string): ModelRate =>
   MODEL_RATES[model] ?? DEFAULT_MODEL_RATE;
@@ -90,10 +108,14 @@ interface AiConfig {
    * the local credit ledger still enforces the hard monthly cap as a safety net
    */
   perUserManagedEnabled: boolean;
-  /** Claude model id passed through to Synapse. */
+  /** Model id passed to Synapse: a virtual routed model (`auto`) or a concrete id. */
   model: string;
   /** Spend rate for the active model. */
   rate: ModelRate;
+  /** Concrete model used if a virtual/routed `model` is refused by the gateway. */
+  fallbackModel: string;
+  /** Spend rate for the fallback model. */
+  fallbackRate: ModelRate;
   /** Whether the managed (our-key) generation path is enabled. */
   managedEnabled: boolean;
   /** Maximum accepted prompt length in characters. */
@@ -136,7 +158,8 @@ export const getAiConfig = (): AiConfig => {
   const synapseApiKey = env.SYNAPSE_API_KEY || undefined;
   const synapseApiUrl = env.SYNAPSE_API_URL?.replace(/\/+$/, "") || undefined;
   const synapseGatewaySecret = env.SYNAPSE_GATEWAY_SECRET || undefined;
-  const model = env.FACET_AI_MODEL ?? DEFAULT_MODEL;
+  const model = env.FACET_AI_MODEL ?? DEFAULT_ROUTED_MODEL;
+  const fallbackModel = env.FACET_AI_FALLBACK_MODEL || DEFAULT_MODEL;
 
   return {
     synapseBaseUrl,
@@ -146,6 +169,8 @@ export const getAiConfig = (): AiConfig => {
     perUserManagedEnabled: Boolean(synapseApiUrl && synapseGatewaySecret),
     model,
     rate: rateForModel(model),
+    fallbackModel,
+    fallbackRate: rateForModel(fallbackModel),
     managedEnabled: Boolean(synapseApiKey),
     maxPromptChars: toInt(env.MAX_PROMPT_CHARS, 2000),
     maxOutputTokens: toInt(env.MAX_OUTPUT_TOKENS, 2048),
