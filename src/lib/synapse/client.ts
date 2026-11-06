@@ -3,7 +3,7 @@ import {
   estimateSynapseCostCents,
 } from "@omnidotdev/providers/ai";
 
-import { getAiConfig } from "lib/config/ai.config";
+import { getAiConfig, isVirtualModel } from "lib/config/ai.config";
 
 /**
  * Facet's binding over the shared Synapse client (`@omnidotdev/providers/ai`).
@@ -70,16 +70,11 @@ const optionsFromConfig = (): SynapseClientOptions => {
   };
 };
 
-/**
- * Call Synapse's `/v1/messages` via the shared client. Returns the concatenated
- * text and a usage record (cost always resolved to a number, since Facet always
- * configures a rate). Throws a generic, non-leaking error on failure
- */
-export const callSynapse = async (
+/** One `/v1/messages` call against a specific model, resolving cost to a number. */
+const callOnce = async (
+  opts: SynapseClientOptions,
   input: SynapseCallInput,
-  options?: Partial<SynapseClientOptions>,
 ): Promise<SynapseResult> => {
-  const opts: SynapseClientOptions = { ...optionsFromConfig(), ...options };
   const rate = {
     inputCentsPerMTok: opts.inputCentsPerMTok,
     outputCentsPerMTok: opts.outputCentsPerMTok,
@@ -119,4 +114,45 @@ export const callSynapse = async (
       costCents,
     },
   };
+};
+
+/**
+ * Call Synapse's `/v1/messages` via the shared client. Returns the concatenated
+ * text and a usage record (cost always resolved to a number, since Facet always
+ * configures a rate). Throws a generic, non-leaking error on failure.
+ *
+ * When the configured model is a Synapse virtual/routed model (`auto`, `best`,
+ * ...) and the gateway refuses it (this key is not entitled for smart routing,
+ * or the id is unknown), the call degrades once to the concrete fallback model
+ * so generation never breaks. A concrete model's failure is a real error and is
+ * surfaced, not retried. An explicit per-request model override opts out of the
+ * fallback (the caller asked for that exact model)
+ */
+export const callSynapse = async (
+  input: SynapseCallInput,
+  options?: Partial<SynapseClientOptions>,
+): Promise<SynapseResult> => {
+  const opts: SynapseClientOptions = { ...optionsFromConfig(), ...options };
+
+  try {
+    return await callOnce(opts, input);
+  } catch (err) {
+    const cfg = getAiConfig();
+    const modelOverridden = options?.model !== undefined;
+    const canFallback =
+      !modelOverridden &&
+      isVirtualModel(opts.model) &&
+      opts.model !== cfg.fallbackModel;
+    if (!canFallback) throw err;
+
+    return callOnce(
+      {
+        ...opts,
+        model: cfg.fallbackModel,
+        inputCentsPerMTok: cfg.fallbackRate.inputCentsPerMTok,
+        outputCentsPerMTok: cfg.fallbackRate.outputCentsPerMTok,
+      },
+      input,
+    );
+  }
 };

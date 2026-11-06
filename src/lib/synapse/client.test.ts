@@ -186,3 +186,129 @@ describe("callSynapse", () => {
     await expect(call).rejects.toThrow(/synapse request failed/i);
   });
 });
+
+/**
+ * A fetch that refuses whichever model id is in `rejectModel` (as if the gateway
+ * does not entitle smart routing for this key) and answers every other model
+ * with a canned success, recording the model of each call in order
+ */
+const modelAwareFetch = (
+  rejectModel: string,
+): { fetchImpl: typeof fetch; models: string[] } => {
+  const models: string[] = [];
+  const fetchImpl = (async (
+    _url: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const model = JSON.parse(String(init?.body)).model as string;
+    models.push(model);
+    if (model === rejectModel)
+      return new Response(JSON.stringify({ error: "model not available" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
+    return new Response(JSON.stringify(anthropicResponse("ok")), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, models };
+};
+
+describe("callSynapse virtual-model routing fallback", () => {
+  const ENV_KEYS = [
+    "FACET_AI_MODEL",
+    "FACET_AI_FALLBACK_MODEL",
+    "SYNAPSE_API_KEY",
+  ] as const;
+  let snapshot: Record<string, string | undefined> = {};
+
+  const setEnv = () => {
+    snapshot = {};
+    for (const k of ENV_KEYS) {
+      snapshot[k] = process.env[k];
+      delete process.env[k];
+    }
+  };
+  const restoreEnv = () => {
+    for (const k of ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  };
+
+  const FALLBACK = "anthropic/claude-sonnet-4-5-20250929";
+
+  test("degrades to the concrete fallback when the virtual model is refused", async () => {
+    setEnv();
+    try {
+      process.env.FACET_AI_MODEL = "auto";
+      process.env.FACET_AI_FALLBACK_MODEL = FALLBACK;
+      process.env.SYNAPSE_API_KEY = "server-key";
+      const { fetchImpl, models } = modelAwareFetch("auto");
+
+      const result = await callSynapse(
+        {
+          system: "s",
+          messages: [{ role: "user", content: "p" }],
+          maxTokens: 10,
+        },
+        { fetchImpl },
+      );
+
+      expect(models).toEqual(["auto", FALLBACK]);
+      expect(result.text).toBe("ok");
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  test("does not retry when the virtual model succeeds", async () => {
+    setEnv();
+    try {
+      process.env.FACET_AI_MODEL = "auto";
+      process.env.FACET_AI_FALLBACK_MODEL = FALLBACK;
+      process.env.SYNAPSE_API_KEY = "server-key";
+      // Reject a model nobody uses, so `auto` succeeds on the first call
+      const { fetchImpl, models } = modelAwareFetch("never");
+
+      await callSynapse(
+        {
+          system: "s",
+          messages: [{ role: "user", content: "p" }],
+          maxTokens: 10,
+        },
+        { fetchImpl },
+      );
+
+      expect(models).toEqual(["auto"]);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  test("a concrete model failure is surfaced, never retried", async () => {
+    setEnv();
+    try {
+      process.env.FACET_AI_MODEL = FALLBACK; // a concrete routed model
+      process.env.FACET_AI_FALLBACK_MODEL =
+        "anthropic/claude-haiku-4-5-20251001";
+      process.env.SYNAPSE_API_KEY = "server-key";
+      const { fetchImpl, models } = modelAwareFetch(FALLBACK);
+
+      const call = callSynapse(
+        {
+          system: "s",
+          messages: [{ role: "user", content: "p" }],
+          maxTokens: 10,
+        },
+        { fetchImpl },
+      );
+
+      await expect(call).rejects.toThrow(/synapse request failed/i);
+      expect(models).toEqual([FALLBACK]);
+    } finally {
+      restoreEnv();
+    }
+  });
+});

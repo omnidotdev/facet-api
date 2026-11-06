@@ -36,7 +36,8 @@ describe("getAiConfig", () => {
     const cfg = getAiConfig();
     expect(cfg.managedEnabled).toBe(false);
     expect(cfg.synapseApiKey).toBeUndefined();
-    expect(cfg.model).toBe("anthropic/claude-sonnet-4-5-20250929");
+    expect(cfg.model).toBe("auto");
+    expect(cfg.fallbackModel).toBe("anthropic/claude-sonnet-4-5-20250929");
     expect(cfg.maxPromptChars).toBe(2000);
     expect(cfg.maxOutputTokens).toBe(2048);
     expect(cfg.dailySpendCeilingCents).toBe(500);
@@ -46,14 +47,17 @@ describe("getAiConfig", () => {
     expect(cfg.rateLimitMax).toBe(20);
   });
 
-  test("the default model is a Synapse provider-prefixed id with an explicit rate", () => {
-    // Guards the class of bug that broke managed + BYOK: a bare id like
-    // "claude-sonnet-5-5" 404s at the Synapse gateway, which only accepts
-    // provider-prefixed ids (e.g. anthropic/...). The default must also carry an
-    // explicit rate, not the conservative opus-tier fallback
+  test("defaults to Synapse smart routing with a concrete, rated fallback", () => {
+    // The default routed model is the virtual `auto`, so Synapse picks the
+    // model per request. The concrete fallback (used if the gateway refuses the
+    // virtual model) must still be a provider-prefixed id with an explicit rate:
+    // a bare id like "claude-sonnet-5-5" 404s at the gateway, which only accepts
+    // provider-prefixed ids (e.g. anthropic/...), and the rate must not be the
+    // conservative opus-tier default
     const cfg = getAiConfig();
-    expect(cfg.model).toMatch(/^[a-z0-9-]+\/.+/);
-    expect(cfg.rate).not.toEqual({
+    expect(cfg.model).toBe("auto");
+    expect(cfg.fallbackModel).toMatch(/^[a-z0-9-]+\/.+/);
+    expect(cfg.fallbackRate).not.toEqual({
       inputCentsPerMTok: 400,
       outputCentsPerMTok: 2000,
     });
