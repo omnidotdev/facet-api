@@ -53,6 +53,46 @@ const API_SPEC: ApiGroup[] = [
     ],
   },
   {
+    heading:
+      "2D sketches and sweeps (a sketch is a flat profile; extrude or revolve it into a solid; B-rep, the Studio auto-switches kernels)",
+    entries: [
+      {
+        signature: "circle(r = 1, opts?: { segments?: number }): Sketch",
+        summary:
+          "A 2D circle of radius r mm. A low `segments` count makes a regular polygon (6 for a hexagon).",
+      },
+      {
+        signature:
+          "square(size: number | [w, h] = 1, opts?: { center?: boolean }): Sketch",
+        summary:
+          "A 2D square/rectangle. square(10) is 10mm on a side; square([w, h]) is rectangular. rect is an alias. Centered by default.",
+      },
+      {
+        signature: "polygon(points: [x, y][] | number[]): Sketch",
+        summary:
+          "A 2D polygon from a ring of [x, y] points (mm). The ring closes back to the first point automatically.",
+      },
+      {
+        signature:
+          "extrude(sketch: Sketch, height: number, opts?: { twist?: number; scale?: number }): Shape",
+        summary:
+          "Extrude a sketch straight up by height mm into a solid. twist is total degrees over the height (0 = straight); scale tapers the top face (1 = straight walls, 0.5 = half-size top). Also a method: sketch.extrude(height, opts).",
+      },
+      {
+        signature:
+          "revolve(sketch: Sketch, opts?: { angle?: number; segments?: number }): Shape",
+        summary:
+          "Revolve a sketch about the Z axis into a solid of revolution; the profile's X is the radius, its Y the height (keep the profile at x >= 0). angle is the sweep in degrees (360 = a full solid). Also a method: sketch.revolve(opts).",
+      },
+      {
+        signature:
+          "sketch.union / .add / .subtract / .sub / .intersect(...others: Sketch[]): Sketch; sketch.offset(distance: number): Sketch",
+        summary:
+          "Combine 2D sketches before sweeping (2D booleans), or offset an outline outward (+) / inward (-) by distance mm. Example: circle(10).subtract(circle(6)) is a ring.",
+      },
+    ],
+  },
+  {
     heading: "Boolean free functions (read nicely at the top level)",
     entries: [
       {
@@ -215,6 +255,40 @@ return part;`,
   },
   {
     prompt:
+      "A five-pointed star extruded into a 4mm-thick badge, with the star size on a slider.",
+    code: `const r = param.number("radius", { min: 10, max: 60, default: 30, step: 1 });
+const inner = r * 0.4;
+
+const pts = [];
+for (let i = 0; i < 10; i++) {
+  const a = (i / 10) * Math.PI * 2 + Math.PI / 2;
+  const rad = i % 2 === 0 ? r : inner;
+  pts.push([Math.cos(a) * rad, Math.sin(a) * rad]);
+}
+return extrude(polygon(pts), 4);`,
+  },
+  {
+    prompt:
+      "A simple vase: revolve a profile so it flares from a 20mm base to a 32mm rim, 80mm tall, hollow.",
+    code: `const h = param.number("height", { min: 40, max: 140, default: 80, step: 1 });
+const base = 20;
+const rim = 32;
+const wall = 2;
+
+// Cross-section in the XZ plane: outer wall up, across the rim, inner wall down,
+// closing across the base. X is the radius, Y the height
+const profile = polygon([
+  [0, 0],
+  [base, 0],
+  [rim, h],
+  [rim - wall, h],
+  [base - wall, wall],
+  [0, wall],
+]);
+return revolve(profile, { segments: 96 });`,
+  },
+  {
+    prompt:
       "A pipe flange: a 30mm-radius disc 6mm thick, bored out to 14mm, with six bolt holes on a 22mm circle.",
     code: `const flange = cylinder(30, 6, { segments: 72 });
 const bore = cylinder(14, 20, { segments: 72 });
@@ -260,6 +334,7 @@ Output contract (strict):
 - Use only the API documented below. Do not invent functions or methods.
 - fillet, chamfer and shell are exact-geometry (B-rep) operations; the Studio switches to the exact kernel automatically when they are used.
 - For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
+- For a curvy or custom profile (a glyph, a cam, a gear outline, a logo), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.
 - Expose the key dimensions the user names as parameters (param.number / param.boolean / param.enum) with sensible min/max/default in mm, so the model is adjustable. Compute derived values from them.
 - Keep it simple and correct: a model that builds and clearly matches the request beats an elaborate one that may fail. Do not add features the user did not ask for.
 
