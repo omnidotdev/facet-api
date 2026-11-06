@@ -44,6 +44,22 @@ describe("buildSystemPrompt", () => {
     }
   });
 
+  test("documents the 2D sketch and sweep API", () => {
+    for (const fn of [
+      "circle",
+      "square",
+      "polygon",
+      "extrude",
+      "revolve",
+      "offset",
+    ]) {
+      expect(prompt).toContain(fn);
+    }
+    // the sketch -> solid concept is stated, not just the names
+    expect(prompt).toMatch(/revolve/i);
+    expect(prompt).toMatch(/extrude/i);
+  });
+
   test("states units: millimeters and degrees", () => {
     expect(prompt).toMatch(/mm|millimet/i);
     expect(prompt).toMatch(/degree/i);
