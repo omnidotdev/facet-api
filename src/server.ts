@@ -36,6 +36,7 @@ import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
+import { createCapabilitiesRoute } from "lib/routes/capabilities";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
 
@@ -187,6 +188,9 @@ const app = new Elysia({
       provisioner,
     }),
   )
+  // Client capability probe: lets the Studio show the AI panel only to users
+  // who may actually use managed generation (env allowlist), never hardcoded
+  .use(createCapabilitiesRoute({ authenticate: authenticateUser }))
   .use(webhooks)
   .use(
     yoga({
