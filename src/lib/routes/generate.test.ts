@@ -133,7 +133,13 @@ let snapshot: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   snapshot = {};
-  for (const k of ENV_KEYS) snapshot[k] = process.env[k];
+  // Snapshot, then clear every toggled key so the file is hermetic: a value
+  // left set by an earlier test file (the suite runs them in one process) must
+  // not bleed in, or e.g. a leaked FACET_MANAGED_ALLOWLIST gates the happy path
+  for (const k of ENV_KEYS) {
+    snapshot[k] = process.env[k];
+    delete process.env[k];
+  }
   // managed path enabled by default
   process.env.SYNAPSE_API_KEY = "server-key-secret";
   process.env.MAX_PROMPT_CHARS = "2000";
