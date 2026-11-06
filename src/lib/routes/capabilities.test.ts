@@ -16,13 +16,21 @@ describe("/capabilities", () => {
   const prevKey = process.env.SYNAPSE_API_KEY;
   const prevList = process.env.FACET_MANAGED_ALLOWLIST;
 
+  // Restore a key to its prior value, deleting it when it had none. Assigning
+  // `process.env.X = undefined` would write the literal string "undefined",
+  // which leaks a truthy value into the next test file (a non-empty allowlist)
+  const restore = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  };
+
   beforeEach(() => {
     process.env.SYNAPSE_API_KEY = "server-key";
     process.env.FACET_MANAGED_ALLOWLIST = "user-1";
   });
   afterEach(() => {
-    process.env.SYNAPSE_API_KEY = prevKey;
-    process.env.FACET_MANAGED_ALLOWLIST = prevList;
+    restore("SYNAPSE_API_KEY", prevKey);
+    restore("FACET_MANAGED_ALLOWLIST", prevList);
   });
 
   test("managed true for an allowlisted signed-in user", async () => {
