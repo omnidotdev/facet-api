@@ -32,6 +32,7 @@ describe("buildSystemPrompt", () => {
       "move",
       "rotate",
       "scale",
+      "mirror",
       "add",
       "subtract",
       "sub",

@@ -126,6 +126,11 @@ const API_SPEC: ApiGroup[] = [
         summary: "Scale; a single number scales uniformly.",
       },
       {
+        signature: "mirror(x: number | [x, y, z], y?, z?): Shape",
+        summary:
+          "Reflect across the plane through the origin whose normal is (x, y, z), like OpenSCAD's mirror. mirror([1,0,0]) flips X, [0,1,0] flips Y. Use it with union to build a symmetric part from one half.",
+      },
+      {
         signature: "union(...others: Shape[]): Shape",
         summary: "Fuse this shape with others.",
       },
