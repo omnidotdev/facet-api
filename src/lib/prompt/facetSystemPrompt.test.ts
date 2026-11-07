@@ -51,6 +51,7 @@ describe("buildSystemPrompt", () => {
       "square",
       "polygon",
       "importSvg",
+      "text(",
       "extrude",
       "revolve",
       "offset",

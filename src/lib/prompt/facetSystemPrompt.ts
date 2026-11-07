@@ -73,6 +73,11 @@ const API_SPEC: ApiGroup[] = [
           "A 2D polygon from a ring of [x, y] points (mm). The ring closes back to the first point automatically.",
       },
       {
+        signature: "text(content: string, opts?: { size?: number }): Sketch",
+        summary:
+          "A line of text as a 2D sketch in the bundled sans font, `size` mm tall (default 10). Extrude it for a raised label or subtract an extruded copy to engrave. Use this for part numbers, names, and short labels; use importSvg for arbitrary glyphs/logos.",
+      },
+      {
         signature: "importSvg(pathData: string): Sketch",
         summary:
           "A 2D sketch from an SVG path `d` string (M/L/H/V/C/S/Q/T/A/Z). The exact way to make a glyph, symbol, icon, or logo: emit its real outline as an SVG path and extrude it, instead of approximating a curvy shape with boolean'd circles. The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
