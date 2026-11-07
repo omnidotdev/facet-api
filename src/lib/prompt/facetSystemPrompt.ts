@@ -73,6 +73,11 @@ const API_SPEC: ApiGroup[] = [
           "A 2D polygon from a ring of [x, y] points (mm). The ring closes back to the first point automatically.",
       },
       {
+        signature: "importSvg(pathData: string): Sketch",
+        summary:
+          "A 2D sketch from an SVG path `d` string (M/L/H/V/C/S/Q/T/A/Z). The exact way to make a glyph, symbol, icon, or logo: emit its real outline as an SVG path and extrude it, instead of approximating a curvy shape with boolean'd circles. The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
+      },
+      {
         signature:
           "extrude(sketch: Sketch, height: number, opts?: { twist?: number; scale?: number }): Shape",
         summary:
@@ -339,7 +344,8 @@ Output contract (strict):
 - Use only the API documented below. Do not invent functions or methods.
 - fillet, chamfer and shell are exact-geometry (B-rep) operations; the Studio switches to the exact kernel automatically when they are used.
 - For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
-- For a curvy or custom profile (a glyph, a cam, a gear outline, a logo), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.
+- For a recognizable glyph, symbol, letter, icon, or logo (a zodiac sign, a star, a company mark), DO NOT approximate it from boolean'd circles. Emit its exact outline as an SVG path and \`extrude(importSvg("<path d>"), thickness)\`. SVG coordinates are fine as-is (the Y flip and holes are handled). This is the single best tool for anything with a known, curvy, named shape.
+- For a curvy or custom profile that is NOT a known glyph (a cam, a gear outline, a bracket), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.
 - Expose the key dimensions the user names as parameters (param.number / param.boolean / param.enum) with sensible min/max/default in mm, so the model is adjustable. Compute derived values from them.
 - Keep it simple and correct: a model that builds and clearly matches the request beats an elaborate one that may fail. Do not add features the user did not ask for.
 
