@@ -50,6 +50,12 @@ const API_SPEC: ApiGroup[] = [
         summary:
           "A cylinder of radius r mm and height h mm. A low `segments` count makes a regular polygonal prism (segments: 6 for a hexagon/hex nut, 8 for an octagon); a high count (the default 32) reads as round. This holds in both the mesh and the exact B-rep kernel.",
       },
+      {
+        signature:
+          "cone(r1 = 1, r2 = 0, h = 1, opts?: { center?: boolean; segments?: number }): Shape",
+        summary:
+          "A cone or tapered cylinder h mm tall, radius r1 mm at the base and r2 mm at the top: r2 = 0 is a sharp point, r2 equal to r1 is a plain cylinder, anything between is a truncated cone (frustum). Like cylinder, a low `segments` count makes a faceted taper. Use it for funnels, nose cones, countersinks, and tapered standoffs instead of stacking cylinders.",
+      },
     ],
   },
   {
@@ -100,6 +106,12 @@ const API_SPEC: ApiGroup[] = [
         summary:
           "Combine 2D sketches before sweeping (2D booleans), or offset an outline outward (+) / inward (-) by distance mm. Example: circle(10).subtract(circle(6)) is a ring.",
       },
+      {
+        signature:
+          "sketch.translate(x, y) / .move(x, y) / .rotate(deg) / .scale(factor) / .mirror([nx, ny]): Sketch",
+        summary:
+          "Position and reflect a 2D sketch before sweeping, each about the origin: translate/move by (x, y) mm, rotate by deg degrees, scale uniformly by factor, or mirror across the line through the origin with normal [nx, ny] (mirror([1, 0]) flips X, [0, 1] flips Y). Build one half of a symmetric profile and `half.union(half.mirror([1, 0]))` so the two halves line up exactly.",
+      },
     ],
   },
   {
@@ -116,6 +128,21 @@ const API_SPEC: ApiGroup[] = [
       {
         signature: "intersection(...shapes: Shape[]): Shape",
         summary: "Keep only the overlap of the shapes.",
+      },
+    ],
+  },
+  {
+    heading: "More solids (convex hull and explicit polyhedra; exact B-rep)",
+    entries: [
+      {
+        signature: "hull(...shapes: Shape[]): Shape",
+        summary:
+          "The convex hull wrapping all of its inputs in a single solid. Hull a few spheres or cylinders to get a smooth rounded blob, a capsule, or a tapered link between two profiles.",
+      },
+      {
+        signature: "polyhedron(points: [x, y, z][], faces: number[][]): Shape",
+        summary:
+          "A solid from explicit geometry: a list of [x, y, z] vertices (mm) and a list of faces, each an array of indices into that list wound counter-clockwise seen from outside. Faces may be triangles or convex n-gons. Reach for this only when a shape cannot be built from the primitives and sweeps above.",
       },
     ],
   },
@@ -318,6 +345,26 @@ for (let i = 0; i < bolts; i++) {
 }
 return part;`,
   },
+  {
+    prompt:
+      "A tapered standoff: a cone from a 6mm base to a 2mm top, 24mm tall, with the height on a slider.",
+    code: `const h = param.number("height", { min: 10, max: 60, default: 24, step: 1 });
+const base = param.number("base", { min: 2, max: 12, default: 6, step: 0.5 });
+return cone(base, 2, h);`,
+  },
+  {
+    prompt:
+      "A symmetric arrow marker, 4mm thick, built from one half mirrored so the sides match exactly.",
+    code: `const half = polygon([
+  [0, 20], // tip
+  [10, 0], // barb
+  [3, 0],
+  [3, -12], // tail
+  [0, -12],
+]);
+const arrow = half.union(half.mirror([1, 0]));
+return extrude(arrow, 4);`,
+  },
 ];
 
 const renderApiSpec = (): string =>
@@ -351,6 +398,8 @@ Output contract (strict):
 - For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
 - For a recognizable glyph, symbol, letter, icon, or logo (a zodiac sign, a star, a company mark), DO NOT approximate it from boolean'd circles. Emit its exact outline as an SVG path and \`extrude(importSvg("<path d>"), thickness)\`. SVG coordinates are fine as-is (the Y flip and holes are handled). This is the single best tool for anything with a known, curvy, named shape.
 - For a curvy or custom profile that is NOT a known glyph (a cam, a gear outline, a bracket), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.
+- For a left-right symmetric profile (an arrow, a shield, a heart, a letter like A or M, most icons), sketch one half at x >= 0 and combine it with its reflection: \`half.union(half.mirror([1, 0]))\`, so the two sides line up exactly instead of being placed by hand.
+- For a cone, tapered cylinder, funnel, nose cone, or countersink, use \`cone(r1, r2, h)\` (r2 = 0 for a sharp tip); do not stack or scale cylinders to fake a taper.
 - Expose the key dimensions the user names as parameters (param.number / param.boolean / param.enum) with sensible min/max/default in mm, so the model is adjustable. Compute derived values from them.
 - Keep it simple and correct: a model that builds and clearly matches the request beats an elaborate one that may fail. Do not add features the user did not ask for.
 
