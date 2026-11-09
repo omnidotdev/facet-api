@@ -127,6 +127,7 @@ const ENV_KEYS = [
   "MAX_OUTPUT_TOKENS",
   "MAX_REPAIR_ATTEMPTS",
   "CREDIT_COGS_MARKUP",
+  "FREE_MONTHLY_CREDITS",
   "FACET_MANAGED_ALLOWLIST",
 ] as const;
 let snapshot: Record<string, string | undefined> = {};
@@ -219,7 +220,9 @@ describe("POST /generate", () => {
 
   test("a credit is a retail unit: debits ceil(costCents * markup), breaker tracks real cents", async () => {
     const { caller } = makeCaller(FENCED, 5); // 5 cents of real model spend
-    const { store, spendCalls } = makeCreditStore();
+    // a free-tier user (cap at the default free allowance of 100), so their
+    // real-cent spend is tracked by the global breaker
+    const { store, spendCalls } = makeCreditStore(100);
     const breaker = createSpendBreaker(500);
     const request = makeApp({ caller, creditStore: store, breaker });
 
@@ -348,15 +351,73 @@ describe("POST /generate", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("returns 503 when the daily breaker is tripped (managed path)", async () => {
+  test("returns 503 when the daily breaker is tripped (free-tier managed path)", async () => {
     const breaker = createSpendBreaker(100);
     await breaker.record(100);
     const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, breaker });
+    // a free-tier user (cap at the free allowance) is gated by the breaker
+    const request = makeApp({
+      caller,
+      breaker,
+      creditStore: makeCreditStore(100).store,
+    });
     const res = await request({ prompt: "a cube" });
 
     expect(res.status).toBe(503);
     expect(calls).toHaveLength(0);
+  });
+
+  describe("free-tier breaker insulation (paid users are not blocked by free abuse)", () => {
+    test("a paid user (cap above the free allowance) is served even when the free-tier breaker is tripped", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100); // tripped
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        breaker,
+        creditStore: makeCreditStore(2000).store, // paid cap, above the free 100
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      // bounded by their own revenue-backed per-user cap, not the free ceiling
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    test("paid spend is metered to the user ledger but never recorded against the free breaker", async () => {
+      const breaker = createSpendBreaker(500); // not tripped
+      const { store, spendCalls } = makeCreditStore(2000); // paid
+      const request = makeApp({
+        caller: makeCaller(FENCED, 5).caller,
+        breaker,
+        creditStore: store,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      // the per-user ledger still meters (the hard-cap safety net)
+      expect(spendCalls).toHaveLength(1);
+      // but the global free-tier breaker is untouched by paid spend
+      expect(await breaker.spentTodayCents()).toBe(0);
+    });
+
+    test("a free user (cap at the free allowance) is still blocked by a tripped breaker", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100); // tripped
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        breaker,
+        creditStore: makeCreditStore(100).store, // free cap == the free allowance
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
+    });
   });
 
   test("BYOK path bypasses the breaker and the managed-disabled check", async () => {
@@ -449,10 +510,15 @@ describe("POST /generate", () => {
     expect(spendCalls).toHaveLength(0);
   });
 
-  test("managed path forwards no BYOK key and records spend in the breaker", async () => {
+  test("managed path forwards no BYOK key and records free spend in the breaker", async () => {
     const breaker = createSpendBreaker(500);
     const { caller, calls } = makeCaller(FENCED, 3);
-    const request = makeApp({ caller, breaker });
+    // a free-tier user, whose real-cent spend the global breaker tracks
+    const request = makeApp({
+      caller,
+      breaker,
+      creditStore: makeCreditStore(100).store,
+    });
     const res = await request({ prompt: "a cube" });
 
     expect(res.status).toBe(200);

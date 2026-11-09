@@ -16,8 +16,10 @@ import type { callSynapse } from "lib/synapse/client";
  *
  * Money-safety is defense-in-depth and each layer is independent:
  * - the server Synapse key lives only in config, never in a response or a log
- * - the managed path requires the key and an untripped global daily breaker
- * - the managed path requires a signed-in Omni identity (no anonymous paid inference)
+ * - the managed path requires the server key and a signed-in Omni identity
+ * - the global daily breaker gates the FREE allowance only, so free-tier abuse
+ *   (Sybil farming) cannot exhaust the ceiling and block paying users; a paid
+ *   user is bounded instead by their own revenue-backed per-user cap
  * - the managed path is hard-capped per user per UTC month with no overage
  * - per-request caps (prompt length, output tokens, timeout) bound each call
  * - a per-IP sliding-window limiter throttles abuse
@@ -136,8 +138,12 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         ? input.byokKey
         : undefined;
     let userId: string | undefined;
+    // A paid user (monthly cap above the free allowance) is exempt from the
+    // global free-tier breaker and is not recorded against it; tracked here so
+    // the post-call metering below stays consistent with this gate
+    let isPaid = false;
     if (!byokKey) {
-      if (!cfg.managedEnabled || (await deps.breaker.isTripped())) {
+      if (!cfg.managedEnabled) {
         set.status = 503;
         return { error: MESSAGES.unavailable };
       }
@@ -166,6 +172,16 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       if (usage.usedCredits >= usage.capCredits) {
         set.status = 402;
         return { error: MESSAGES.overCap };
+      }
+
+      // The global daily spend breaker gates the FREE allowance only. A paid
+      // user has a cap above the free allowance and is already bounded and
+      // revenue-backed by that per-user cap, so free-tier abuse (Sybil farming)
+      // can exhaust the shared ceiling without ever blocking a paying user
+      isPaid = usage.capCredits > cfg.freeMonthlyCredits;
+      if (!isPaid && (await deps.breaker.isTripped())) {
+        set.status = 503;
+        return { error: MESSAGES.unavailable };
       }
     }
 
@@ -226,15 +242,19 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     const credits = Math.ceil(result.usage.costCents * cfg.creditCogsMarkup);
     if (!byokKey && userId) {
       // the spend already happened upstream, so a breaker or meter write failure
-      // must not fail the response or lose the user's code; log and fall through
-      try {
-        await deps.breaker.record(result.usage.costCents);
-      } catch (err) {
-        logFailure(
-          `breaker record failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`,
-        );
+      // must not fail the response or lose the user's code; log and fall through.
+      // Only free usage is recorded against the global breaker, matching the gate
+      // above, so paid spend never counts toward (or trips) the free ceiling
+      if (!isPaid) {
+        try {
+          await deps.breaker.record(result.usage.costCents);
+        } catch (err) {
+          logFailure(
+            `breaker record failed: ${
+              err instanceof Error ? err.message : "unknown error"
+            }`,
+          );
+        }
       }
       try {
         await deps.creditStore.recordSpend(userId, credits);
