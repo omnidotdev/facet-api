@@ -17,6 +17,9 @@ describe("buildSystemPrompt", () => {
       "box",
       "sphere",
       "cylinder",
+      "cone",
+      "hull",
+      "polyhedron",
       "union",
       "difference",
       "intersection",
@@ -61,6 +64,12 @@ describe("buildSystemPrompt", () => {
     // the sketch -> solid concept is stated, not just the names
     expect(prompt).toMatch(/revolve/i);
     expect(prompt).toMatch(/extrude/i);
+  });
+
+  test("documents the 2D sketch transforms and the mirror-symmetry pattern", () => {
+    expect(prompt).toContain("sketch.translate");
+    // building a symmetric profile from one half is the headline use
+    expect(prompt).toContain("half.mirror([1, 0])");
   });
 
   test("states units: millimeters and degrees", () => {
