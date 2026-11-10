@@ -81,12 +81,12 @@ const API_SPEC: ApiGroup[] = [
       {
         signature: "text(content: string, opts?: { size?: number }): Sketch",
         summary:
-          "A line of text as a 2D sketch in the bundled sans font, `size` mm tall (default 10). Extrude it for a raised label or subtract an extruded copy to engrave. Use this for part numbers, names, and short labels; use importSvg for arbitrary glyphs/logos.",
+          "A line of text as a 2D sketch in the bundled sans font, `size` mm tall (default 10). Extrude it for a raised label or subtract an extruded copy to engrave. Use this for any letters, digits, words, part numbers, names, and labels: it is precise, unlike a hand-authored glyph path.",
       },
       {
         signature: "importSvg(pathData: string): Sketch",
         summary:
-          "A 2D sketch from an SVG path `d` string (M/L/H/V/C/S/Q/T/A/Z). The exact way to make a glyph, symbol, icon, or logo: emit its real outline as an SVG path and extrude it, instead of approximating a curvy shape with boolean'd circles. The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
+          "A 2D sketch from an SVG path `d` string (M/L/H/V/C/S/Q/T/A/Z). Use it ONLY for an SVG path the user actually provides; do NOT invent a path from memory to draw a named glyph, symbol, or logo, as that comes out wrong (use text() for letters/words, and primitives + a 2D sketch for geometric shapes). The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
       },
       {
         signature:
@@ -396,7 +396,7 @@ Output contract (strict):
 - Use only the API documented below. Do not invent functions or methods.
 - fillet, chamfer and shell are exact-geometry (B-rep) operations; the Studio switches to the exact kernel automatically when they are used.
 - For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
-- For a recognizable glyph, symbol, letter, icon, or logo (a zodiac sign, a star, a company mark), DO NOT approximate it from boolean'd circles. Emit its exact outline as an SVG path and \`extrude(importSvg("<path d>"), thickness)\`. SVG coordinates are fine as-is (the Y flip and holes are handled). This is the single best tool for anything with a known, curvy, named shape.
+- For letters, digits, or words, use \`text("...")\`: it renders them precisely in the bundled font (extrude it for a raised label, subtract an extruded copy to engrave). Do NOT hand-write an SVG path to draw a named glyph or logo (a zodiac sign, a company mark): a path invented from memory comes out wrong, so reach for \`importSvg\` ONLY when the user actually provides the SVG path. For a geometric symbol (a star, heart, arrow, shield), build it from primitives and a 2D sketch (see the symmetric-profile and sketch rules below), not a freehand path.
 - For a curvy or custom profile that is NOT a known glyph (a cam, a gear outline, a bracket), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.
 - For a left-right symmetric profile (an arrow, a shield, a heart, a letter like A or M, most icons), sketch one half at x >= 0 and combine it with its reflection: \`half.union(half.mirror([1, 0]))\`, so the two sides line up exactly instead of being placed by hand.
 - For a cone, tapered cylinder, funnel, nose cone, or countersink, use \`cone(r1, r2, h)\` (r2 = 0 for a sharp tip); do not stack or scale cylinders to fake a taper.
