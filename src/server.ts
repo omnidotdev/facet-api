@@ -190,7 +190,7 @@ const app = new Elysia({
   )
   // Client capability probe: lets the Studio show the AI panel only to users
   // who may actually use managed generation (env allowlist), never hardcoded
-  .use(createCapabilitiesRoute({ authenticate: authenticateUser }))
+  .use(createCapabilitiesRoute({ authenticate: authenticateUser, creditStore }))
   .use(webhooks)
   .use(
     yoga({
