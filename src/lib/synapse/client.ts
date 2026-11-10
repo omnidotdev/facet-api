@@ -5,6 +5,10 @@ import {
 
 import { getAiConfig, isVirtualModel } from "lib/config/ai.config";
 
+import type { SynapseContentBlock } from "@omnidotdev/providers/ai";
+
+export type { SynapseContentBlock };
+
 /**
  * Facet's binding over the shared Synapse client (`@omnidotdev/providers/ai`).
  *
@@ -15,10 +19,14 @@ import { getAiConfig, isVirtualModel } from "lib/config/ai.config";
  * Synapse key is used by default; a per-request BYOK key overrides it
  */
 
-/** A single Anthropic-style conversation turn. */
+/**
+ * A single Anthropic-style conversation turn. `content` is a plain string for a
+ * text turn, or an array of blocks for a multimodal turn (text + inline images,
+ * e.g. a render handed to a vision model for critique)
+ */
 interface SynapseMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | SynapseContentBlock[];
 }
 
 interface SynapseCallInput {

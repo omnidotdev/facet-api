@@ -37,6 +37,7 @@ import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
+import { createCritiqueRoute } from "lib/routes/critique";
 import { createGenerateRoute } from "lib/routes/generate";
 import { callSynapse } from "lib/synapse/client";
 
@@ -185,6 +186,18 @@ const app = new Elysia({
       authenticate: authenticateUser,
       creditStore,
       events,
+      provisioner,
+    }),
+  )
+  // AI vision critique (a money-spending route; same gating as /generate). Grounds
+  // the generation loop by scoring a render of the result against the request
+  .use(
+    createCritiqueRoute({
+      callSynapse,
+      breaker: spendBreaker,
+      rateLimiter: aiRateLimiter,
+      authenticate: authenticateUser,
+      creditStore,
       provisioner,
     }),
   )
