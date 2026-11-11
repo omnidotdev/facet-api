@@ -84,9 +84,9 @@ const API_SPEC: ApiGroup[] = [
           "A line of text as a 2D sketch in the bundled sans font, `size` mm tall (default 10). Extrude it for a raised label or subtract an extruded copy to engrave. Use this for any letters, digits, words, part numbers, names, and labels: it is precise, unlike a hand-authored glyph path.",
       },
       {
-        signature: "importSvg(pathData: string): Sketch",
+        signature: "importSvg(svg: string): Sketch",
         summary:
-          "A 2D sketch from an SVG path `d` string (M/L/H/V/C/S/Q/T/A/Z). Use it ONLY for an SVG path the user actually provides; do NOT invent a path from memory to draw a named glyph, symbol, or logo, as that comes out wrong (use text() for letters/words, and primitives + a 2D sketch for geometric shapes). The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
+          "A 2D sketch from SVG art: either a path `d` string (M/L/H/V/C/S/Q/T/A/Z) OR a whole `<svg>…</svg>` document (every `<path>` plus `<rect>`/`<circle>`/`<ellipse>`/`<line>`/`<polyline>`/`<polygon>`, with element and nested-group `transform` baked in). Use it ONLY for SVG the user actually provides (a pasted path or file); do NOT invent a path from memory to draw a named glyph, symbol, or logo, as that comes out wrong (use text() for letters/words, and primitives + a 2D sketch for geometric shapes). The authored coordinates are used as-is (`viewBox`/CSS/text are not interpreted), so `.scale(...)`/`.translate(...)` to size and place it. The Y axis is flipped so the art reads upright, and opposite-wound subpaths become holes.",
       },
       {
         signature:

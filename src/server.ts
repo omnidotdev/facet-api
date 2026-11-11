@@ -39,6 +39,7 @@ import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
 import { createCritiqueRoute } from "lib/routes/critique";
 import { createGenerateRoute } from "lib/routes/generate";
+import { createImportRoute } from "lib/routes/import";
 import { callSynapse } from "lib/synapse/client";
 
 const commit = (() => {
@@ -199,6 +200,15 @@ const app = new Elysia({
       authenticate: authenticateUser,
       creditStore,
       provisioner,
+    }),
+  )
+  // SVG/image import proxy: fetches user-supplied art by URL server-side (the
+  // browser can't, cross-origin), SSRF-guarded. Spends no AI money; bounded by
+  // sign-in and the per-IP limiter
+  .use(
+    createImportRoute({
+      rateLimiter: aiRateLimiter,
+      authenticate: authenticateUser,
     }),
   )
   // Client capability probe: lets the Studio show the AI panel only to users
