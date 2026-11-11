@@ -1,0 +1,47 @@
+name: Release 🚀
+
+# Changesets-driven, matching the fleet convention (no manual tags): a push to
+# master runs the Changesets action, which opens/updates the "Version Packages"
+# PR from pending changesets. Merging that PR bumps the version and lands a
+# commit titled "Version Packages"; on that push the action finds no changesets
+# and runs the tag step. The package is private (deployed via Fractal, never
+# published to npm), and privatePackages.tag is on, so `changeset publish`
+# git-tags the release without publishing anything.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Version 🦋
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin so CI matches the Bun that writes the committed lockfile and
+          # resolution stays reproducible
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Opens/updates the "Version Packages" PR from pending changesets. When none
+      # remain (the PR was just merged), runs `changeset publish`, which skips the
+      # npm publish for this private package and git-tags the release because
+      # privatePackages.tag is on.
+      - name: Create release pull request or tag release
+        uses: changesets/action@v1
+        with:
+          version: bunx changeset version
+          publish: bunx changeset publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
