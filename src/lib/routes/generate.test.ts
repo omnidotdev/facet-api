@@ -588,4 +588,36 @@ describe("POST /generate", () => {
     expect(refused.status).toBe(429);
     expect(calls).toHaveLength(1);
   });
+
+  test("forwards refine context: prior code + the critic's suggestion, not an error", async () => {
+    // Capture the messages the route builds, to prove the refine turn carries
+    // the critique and is framed as a visual mismatch, never a thrown error
+    const seen: { messages: { role: string; content: string }[] }[] = [];
+    const caller = (async (input: {
+      apiKey?: string;
+      messages: { role: string; content: string }[];
+    }) => {
+      seen.push({ messages: input.messages });
+      return {
+        text: FENCED,
+        usage: { inputTokens: 100, outputTokens: 50, costCents: 1.4 },
+      };
+    }) as Caller;
+    const request = makeApp({ caller });
+
+    const res = await request({
+      prompt: "scorpio symbol",
+      refine: {
+        code: "return cube(10);",
+        suggestion: "Add a curved tail with an arrow stinger at the end.",
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    const text = seen[0]!.messages.map((m) => m.content).join("\n");
+    expect(text).toContain("cube(10)");
+    expect(text).toContain("curved tail");
+    expect(text).not.toMatch(/threw|error/i);
+  });
 });

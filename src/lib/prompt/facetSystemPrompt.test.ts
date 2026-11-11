@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildRepairMessages, buildSystemPrompt } from "./facetSystemPrompt";
+import {
+  buildRefineMessages,
+  buildRepairMessages,
+  buildSystemPrompt,
+} from "./facetSystemPrompt";
 
 describe("buildSystemPrompt", () => {
   const prompt = buildSystemPrompt();
@@ -108,5 +112,32 @@ describe("buildRepairMessages", () => {
     expect(last.role).toBe("user");
     expect(last.content).toContain("KernelError: unknown op 'spere'");
     expect(last.content).toMatch(/fenced ts|single.*block/i);
+  });
+});
+
+describe("buildRefineMessages", () => {
+  test("carries the prior code and the visual critique, ending on a user turn", () => {
+    const messages = buildRefineMessages(
+      "const x = cube(10);\nreturn x;",
+      "Add a curved tail with an arrow stinger at the end.",
+    );
+
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    const assistant = messages.find((m) => m.role === "assistant");
+    expect(assistant?.content).toContain("cube(10)");
+
+    const last = messages[messages.length - 1]!;
+    expect(last.role).toBe("user");
+    expect(last.content).toContain("curved tail");
+    expect(last.content).toMatch(/fenced ts|single.*block/i);
+  });
+
+  test("frames the turn as a visual-match refinement, not a kernel error", () => {
+    const messages = buildRefineMessages("return cube(10);", "Make it round.");
+    const last = messages[messages.length - 1]!;
+    // A refine is a quality improvement, never a thrown-error repair; framing it
+    // as an error would mislead the model and muddy the two follow-up paths
+    expect(last.content).not.toMatch(/threw|error/i);
+    expect(last.content).toMatch(/did not|does not|match/i);
   });
 });

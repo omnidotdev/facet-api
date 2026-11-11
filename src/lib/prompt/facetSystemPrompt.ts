@@ -424,3 +424,21 @@ export const buildRepairMessages = (
     content: `Running that code threw the following error:\n\n${errorText}\n\nFix the problem and reply with a single corrected fenced ts code block, no prose.`,
   },
 ];
+
+/**
+ * Build the refine turns for a follow-up pass driven by the render critic. The
+ * code ran cleanly but a render of it did not fully match the request, so this
+ * feeds back the prior code and the critic's concrete suggestion and asks for an
+ * improved model. Distinct from a repair: there is no error, only a visual
+ * mismatch, so the framing never mentions a thrown error
+ */
+export const buildRefineMessages = (
+  code: string,
+  suggestion: string,
+): PromptMessage[] => [
+  { role: "assistant", content: `\`\`\`ts\n${code}\n\`\`\`` },
+  {
+    role: "user",
+    content: `A render of that model did not fully match the request. ${suggestion}\n\nImprove the model accordingly and reply with a single corrected fenced ts code block, no prose.`,
+  },
+];
