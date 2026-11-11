@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
 import {
+  buildRefineMessages,
   buildRepairMessages,
   buildSystemPrompt,
 } from "lib/prompt/facetSystemPrompt";
@@ -63,6 +64,8 @@ interface GenerateBody {
   prompt?: unknown;
   byokKey?: unknown;
   previous?: { code?: unknown; error?: unknown };
+  /** A render-critic refine pass: prior code plus the critic's visual suggestion. */
+  refine?: { code?: unknown; suggestion?: unknown };
   attempt?: unknown;
 }
 
@@ -185,15 +188,35 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       }
     }
 
-    // 5. build the grounded conversation
+    // 5. build the grounded conversation. Two mutually exclusive follow-up paths
+    // extend the original user turn: a kernel-error repair (prior code + the
+    // thrown error) or a render-critic refine (prior code + a visual suggestion).
+    // Repair wins if both are somehow present, since an error is the harder stop
     const userTurn = { role: "user" as const, content: prompt };
     const previous = input.previous;
-    const messages =
+    const refine = input.refine;
+    let messages: { role: "user" | "assistant"; content: string }[];
+    if (
       previous &&
       typeof previous.code === "string" &&
       typeof previous.error === "string"
-        ? [userTurn, ...buildRepairMessages(previous.code, previous.error)]
-        : [userTurn];
+    ) {
+      messages = [
+        userTurn,
+        ...buildRepairMessages(previous.code, previous.error),
+      ];
+    } else if (
+      refine &&
+      typeof refine.code === "string" &&
+      typeof refine.suggestion === "string"
+    ) {
+      messages = [
+        userTurn,
+        ...buildRefineMessages(refine.code, refine.suggestion),
+      ];
+    } else {
+      messages = [userTurn];
+    }
 
     // 5b. resolve a per-user managed key when provisioning is enabled, so Synapse
     // attributes usage per user. The local ledger still hard-caps below; on any
