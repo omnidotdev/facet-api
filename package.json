@@ -1,12 +1,13 @@
 {
   "name": "@omnidotdev/facet-api",
+  "version": "0.0.0",
   "description": "Facet AI generation gateway. Safely proxies natural-language to parametric CAD generation through the Synapse AI router with defense-in-depth cost controls.",
   "private": true,
   "license": "Apache-2.0",
   "main": "build/server.js",
   "module": "build/server.js",
   "type": "module",
-  "packageManager": "bun@1.3.6",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "dev": "NODE_ENV=development GRAPHILE_ENV=development bun run --watch src/server.ts",
     "build": "bun build --target node --outdir build src/server.ts",
