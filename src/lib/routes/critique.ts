@@ -1,3 +1,4 @@
+import { creditsFromCostCents } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
@@ -240,7 +241,10 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
     }
 
     // 7. meter managed spend only (BYOK is billed to the caller) - mirrors generate
-    const credits = Math.ceil(result.usage.costCents * cfg.creditCogsMarkup);
+    const credits = creditsFromCostCents(
+      result.usage.costCents,
+      cfg.creditCogsMarkup,
+    );
     if (!byokKey && userId) {
       if (!isPaid) {
         try {

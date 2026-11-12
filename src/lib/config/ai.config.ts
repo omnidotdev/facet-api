@@ -6,6 +6,8 @@
  * generation path is only enabled when a server Synapse key is present
  */
 
+import { DEFAULT_CREDIT_COGS_MARKUP } from "@omnidotdev/providers";
+
 const env = process.env;
 
 /** Per-model spend rates in US cents per million tokens, used when Synapse does not return a cost. */
@@ -79,19 +81,12 @@ const toFloat = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-/**
- * Markup applied when converting real model spend (cents) into billable credits.
- *
- * A credit is a retail unit, not raw cost: one generation debits
- * `ceil(costCents * markup)` credits, so a tier's included allowance carries
- * gross margin over model spend. The default 2.0 yields ~50% gross margin on all
- * managed AI (the standard 1.3-3x range for resold inference), tunable per
- * deployment via `CREDIT_COGS_MARKUP`. This is the Omni fleet credit-economics
- * standard; the eventual home is @omnidotdev/providers so every product that
- * meters AI usage inherits one definition. The spend breaker still tracks REAL
- * cents, so the absolute money-safety ceiling is independent of this markup
- */
-const DEFAULT_CREDIT_COGS_MARKUP = 2;
+// The default cost-to-credit markup and the `ceil(costCents * markup)` conversion
+// are the one fleet definition, imported from @omnidotdev/providers
+// (`DEFAULT_CREDIT_COGS_MARKUP` above, `creditsFromCostCents` at the call sites).
+// A credit is a retail unit carrying gross margin, not raw cost; the spend
+// breaker still tracks REAL cents, so the money-safety ceiling is markup-independent.
+// Tunable per deployment via `CREDIT_COGS_MARKUP`.
 
 interface AiConfig {
   /** Synapse base URL, without a trailing slash. */
