@@ -1,5 +1,11 @@
 # @omnidotdev/facet-api
 
+## 0.1.1
+
+### Patch Changes
+
+- [#39](https://github.com/omnidotdev/facet-api/pull/39) [`51082c7`](https://github.com/omnidotdev/facet-api/commit/51082c735b082bef91374c6267eda03c50ba579b) Thanks [@coopbri](https://github.com/coopbri)! - cost: convert model spend to credits through the shared `creditsFromCostCents` / `DEFAULT_CREDIT_COGS_MARKUP` from `@omnidotdev/providers` instead of a local `ceil(costCents * markup)` and a duplicate markup constant. One fleet definition of the cost-to-credit unit; behavior is unchanged (same formula, same default markup).
+
 ## 0.1.0
 
 ### Minor Changes
