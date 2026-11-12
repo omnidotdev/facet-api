@@ -1,3 +1,4 @@
+import { creditsFromCostCents } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
@@ -262,7 +263,10 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     // monthly allowance carries gross margin over model spend. The spend breaker
     // (below) still tracks REAL cents, so the absolute money-safety ceiling is
     // unaffected by the markup
-    const credits = Math.ceil(result.usage.costCents * cfg.creditCogsMarkup);
+    const credits = creditsFromCostCents(
+      result.usage.costCents,
+      cfg.creditCogsMarkup,
+    );
     if (!byokKey && userId) {
       // the spend already happened upstream, so a breaker or meter write failure
       // must not fail the response or lose the user's code; log and fall through.
