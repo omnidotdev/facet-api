@@ -13,6 +13,7 @@ import type { SynapseClientOptions } from "./client";
 const mockFetch = (
   body: unknown,
   status = 200,
+  extraHeaders: Record<string, string> = {},
 ): {
   fetchImpl: typeof fetch;
   calls: { url: string; init: RequestInit }[];
@@ -25,7 +26,7 @@ const mockFetch = (
     calls.push({ url: String(url), init: init ?? {} });
     return new Response(JSON.stringify(body), {
       status,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...extraHeaders },
     });
   }) as unknown as typeof fetch;
 
@@ -169,16 +170,18 @@ describe("callSynapse", () => {
     expect(result.usage.costCents).toBeCloseTo(2400, 5);
   });
 
-  test("prefers an explicit cost returned by Synapse over the estimate", async () => {
-    const body = {
-      ...anthropicResponse("x", 1_000_000, 1_000_000),
-      usage: {
-        input_tokens: 1_000_000,
-        output_tokens: 1_000_000,
-        cost_cents: 7,
+  test("prefers the real cost Synapse reports over the estimate", async () => {
+    // The gateway reports the provider cost (before its margin) and the retail charge;
+    // the breaker records real spend, so only the provider cost is used
+    const { fetchImpl } = mockFetch(
+      anthropicResponse("x", 1_000_000, 1_000_000),
+      200,
+      {
+        "x-synapse-provider-cost-usd": "0.07",
+        "x-synapse-cost-usd": "0.14",
+        "x-synapse-credits": "14",
       },
-    };
-    const { fetchImpl } = mockFetch(body);
+    );
 
     const result = await callSynapse(
       {
@@ -190,7 +193,7 @@ describe("callSynapse", () => {
       { ...baseOpts, fetchImpl },
     );
 
-    expect(result.usage.costCents).toBe(7);
+    expect(result.usage.costCents).toBeCloseTo(7, 6);
   });
 
   test("throws a non-leaking error on a non-2xx response", async () => {
