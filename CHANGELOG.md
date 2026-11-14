@@ -1,5 +1,11 @@
 # @omnidotdev/facet-api
 
+## 0.2.1
+
+### Patch Changes
+
+- [#43](https://github.com/omnidotdev/facet-api/pull/43) [`67d92a4`](https://github.com/omnidotdev/facet-api/commit/67d92a4c8a4065e8d59d4602353b0047446cfb94) Thanks [@coopbri](https://github.com/coopbri)! - Record the gateway-reported real cost on the free-tier spend breaker. The shared Synapse client now reads each call's pre-margin provider cost from the gateway (`x-synapse-provider-cost-usd`), so the breaker records what a generation or critique actually cost upstream instead of a list-rate estimate; the estimate remains the fallback when the gateway reports no cost
+
 ## 0.2.0
 
 ### Minor Changes
