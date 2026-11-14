@@ -1,6 +1,6 @@
 {
   "name": "@omnidotdev/facet-api",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Facet AI generation gateway. Safely proxies natural-language to parametric CAD generation through the Synapse AI router with defense-in-depth cost controls.",
   "private": true,
   "license": "Apache-2.0",

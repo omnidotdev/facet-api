@@ -1,5 +1,11 @@
 # @omnidotdev/facet-api
 
+## 0.2.0
+
+### Minor Changes
+
+- [#41](https://github.com/omnidotdev/facet-api/pull/41) [`16388fd`](https://github.com/omnidotdev/facet-api/commit/16388fd7b84b9b93f9876c8f7d7bf715abf10fb2) Thanks [@coopbri](https://github.com/coopbri)! - Bill managed AI through product-scoped Synapse keys against the user's pooled Aether credit balance. Managed calls now provision a key for the `facet` app billed to the signed-in user, with no fallback to a shared key (`503` when provisioning fails). A gateway `402` surfaces as out of credits and is never retried on the backup model; a gateway `503` surfaces as unavailable. `/capabilities` reports the pooled balance in whole credits plus the user's tier, and `/generate` no longer returns locally computed credits. The local credit ledger (the `credit_ledger` table is dropped by migration `0004`), the entitlement cap resolver, and local cost-to-credit math are removed, guarded by a test. The free-tier daily spend breaker now records whole cents rounded up, fixing writes that the integer `spent_cents` column rejected, and gates by the Aether `tier` entitlement. New env: `BILLING_SERVICE_API_KEY`; removed: `SYNAPSE_API_KEY`, `FREE_MONTHLY_CREDITS`, `CREDIT_COGS_MARKUP`.
+
 ## 0.1.1
 
 ### Patch Changes
