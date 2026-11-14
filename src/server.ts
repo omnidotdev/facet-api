@@ -6,7 +6,6 @@ import { useOpenTelemetry } from "@envelop/opentelemetry";
 import { useParserCache } from "@envelop/parser-cache";
 import { useValidationCache } from "@envelop/validation-cache";
 import { useDisableIntrospection } from "@graphql-yoga/plugin-disable-introspection";
-import { createSynapseProvisioner } from "@omnidotdev/providers/ai";
 import { sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 import { rateLimit } from "elysia-rate-limit";
@@ -15,20 +14,17 @@ import { useGrafast } from "grafast/envelop";
 import webhooks from "webhooks";
 
 import { authenticateUser } from "lib/auth/authenticateUser";
+import { createTierResolver } from "lib/billing/facetBilling";
 import { getAiConfig } from "lib/config/ai.config";
 import appConfig from "lib/config/app.config";
 import {
   BILLING_BASE_URL,
+  BILLING_SERVICE_API_KEY,
   PORT,
   corsAllowedOrigins,
   isDevEnv,
   isProdEnv,
 } from "lib/config/env.config";
-import { createDrizzleCreditStore } from "lib/cost/creditStore.drizzle";
-import {
-  createEntitlementCapResolver,
-  createStaticCapResolver,
-} from "lib/cost/entitlementCap";
 import { createRateLimiter } from "lib/cost/rateLimit";
 import { createDrizzleSpendBreaker } from "lib/cost/spendBreaker.drizzle";
 import { dbPool, pgPool } from "lib/db";
@@ -41,6 +37,7 @@ import { createCritiqueRoute } from "lib/routes/critique";
 import { createGenerateRoute } from "lib/routes/generate";
 import { createImportRoute } from "lib/routes/import";
 import { callSynapse } from "lib/synapse/client";
+import { createFacetProvisioner } from "lib/synapse/provisioner";
 
 const commit = (() => {
   try {
@@ -63,16 +60,20 @@ try {
 }
 
 // AI gateway singletons.
-// The per-user credit meter and the global daily spend breaker are both
-// DB-backed (durable across instances and restarts); the breaker's shared daily
-// counter holds the ceiling even across a restart or multiple replicas. The
-// per-IP rate limiter stays in-memory: a sliding window across instances needs
-// a shared store, and the Synapse-key hard budget plus the per-user cap and the
-// durable breaker already bound worst-case loss. Moving the limiter to a shared
-// store is the remaining Phase C work (see the TODO in rateLimit.ts)
+// Managed AI is billed by the Synapse gateway: each managed call uses a
+// product-scoped key for the facet Aether app, billed to the user's pooled
+// credit balance (the gateway refuses with 402 before spend when it is empty).
+// There is no shared managed key: without provisioning configured, the managed
+// path answers 503 and BYOK keeps working. The global daily spend breaker is
+// DB-backed (durable across instances and restarts) and gates the free tier
+// only. The per-IP rate limiter stays in-memory: a sliding window across
+// instances needs a shared store, and the gateway's credit check plus the
+// durable breaker already bound worst-case loss (see the TODO in rateLimit.ts)
 const aiConfig = getAiConfig();
 if (!aiConfig.managedEnabled) {
-  console.warn("SYNAPSE_API_KEY not set, managed AI generation disabled");
+  console.warn(
+    "SYNAPSE_API_URL or SYNAPSE_GATEWAY_SECRET not set, managed AI generation disabled",
+  );
 }
 const spendBreaker = createDrizzleSpendBreaker(
   dbPool,
@@ -82,36 +83,26 @@ const aiRateLimiter = createRateLimiter({
   windowMs: aiConfig.rateLimitWindowMs,
   max: aiConfig.rateLimitMax,
 });
-// The per-user monthly cap is tier-aware: it is the user's included_credits
-// entitlement for Facet from Aether, with the static free cap as a safe
-// fallback. When billing is not configured, degrade to the static cap so the
-// service still boots and enforces the free allowance (the billing webhook
-// that invalidates the entitlement cache warns separately when its secret is
-// unset)
+// The tier decides whether the free-tier breaker applies, and the balance is
+// what /capabilities reports. Both come from Aether; without it every user
+// reads as free with no known balance
 if (!BILLING_BASE_URL) {
   console.warn(
-    "BILLING_BASE_URL not set, tier-aware credit caps disabled (static free cap)",
+    "BILLING_BASE_URL not set, tier and credit balance disabled (everyone is free tier)",
+  );
+} else if (!BILLING_SERVICE_API_KEY) {
+  console.warn(
+    "BILLING_SERVICE_API_KEY not set, Aether credit balance reads will be refused",
   );
 }
-const capResolver = BILLING_BASE_URL
-  ? createEntitlementCapResolver({
-      billing,
-      fallbackCredits: aiConfig.freeMonthlyCredits,
-    })
-  : createStaticCapResolver(aiConfig.freeMonthlyCredits);
-const creditStore = createDrizzleCreditStore(dbPool, capResolver);
-// Per-user managed keys: when the provisioning API URL + gateway secret are set,
-// the managed path provisions a per-user Synapse key so Synapse attributes usage
-// per user. The local credit ledger above still enforces the hard cap, so this
-// is purely additive. Disabled (shared key) when either env is unset
+const resolveTier = createTierResolver(billing);
 const provisioner =
-  aiConfig.perUserManagedEnabled &&
+  aiConfig.managedEnabled &&
   aiConfig.synapseApiUrl &&
   aiConfig.synapseGatewaySecret
-    ? createSynapseProvisioner({
+    ? createFacetProvisioner({
         apiUrl: aiConfig.synapseApiUrl,
         gatewaySecret: aiConfig.synapseGatewaySecret,
-        source: "Facet",
       })
     : undefined;
 
@@ -185,9 +176,9 @@ const app = new Elysia({
       breaker: spendBreaker,
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
-      creditStore,
       events,
       provisioner,
+      resolveTier,
     }),
   )
   // AI vision critique (a money-spending route; same gating as /generate). Grounds
@@ -198,8 +189,8 @@ const app = new Elysia({
       breaker: spendBreaker,
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
-      creditStore,
       provisioner,
+      resolveTier,
     }),
   )
   // SVG/image import proxy: fetches user-supplied art by URL server-side (the
@@ -212,8 +203,15 @@ const app = new Elysia({
     }),
   )
   // Client capability probe: lets the Studio show the AI panel only to users
-  // who may actually use managed generation (env allowlist), never hardcoded
-  .use(createCapabilitiesRoute({ authenticate: authenticateUser, creditStore }))
+  // who may actually use managed generation (env allowlist), never hardcoded,
+  // with their tier and pooled credit balance
+  .use(
+    createCapabilitiesRoute({
+      authenticate: authenticateUser,
+      billing,
+      resolveTier,
+    }),
+  )
   .use(webhooks)
   .use(
     yoga({

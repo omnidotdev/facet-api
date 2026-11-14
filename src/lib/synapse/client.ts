@@ -1,4 +1,5 @@
 import {
+  SynapseRequestError,
   createSynapseClient,
   estimateSynapseCostCents,
 } from "@omnidotdev/providers/ai";
@@ -12,11 +13,13 @@ export type { SynapseContentBlock };
 /**
  * Facet's binding over the shared Synapse client (`@omnidotdev/providers/ai`).
  *
- * The request/parse logic now lives in the shared `createSynapseClient` (the
+ * The request/parse logic lives in the shared `createSynapseClient` (the
  * fleet's one blessed `/v1/messages` wrapper); this module only binds it to
- * Facet's config (base URL, model, rate, server key) and preserves the existing
- * `callSynapse(input, options?)` surface so callers are unchanged. The server
- * Synapse key is used by default; a per-request BYOK key overrides it
+ * Facet's config (base URL, model, breaker estimate rate) and preserves the
+ * `callSynapse(input, options?)` surface. There is no server key: every call
+ * carries its own key, either the product-scoped managed key provisioned for
+ * the user or the caller's BYOK key. A gateway refusal throws the shared
+ * `SynapseRequestError`, whose `status` the routes map onto their UX
  */
 
 /**
@@ -36,14 +39,17 @@ interface SynapseCallInput {
   messages: SynapseMessage[];
   /** Output token ceiling for this call. */
   maxTokens: number;
-  /** Optional BYOK key, used instead of the server key when present. */
-  apiKey?: string;
+  /** The key for this call: the product-scoped managed key or a BYOK key */
+  apiKey: string;
 }
 
 interface SynapseUsage {
   inputTokens: number;
   outputTokens: number;
-  /** Spend for this call in US cents, from Synapse if reported, else estimated. */
+  /**
+   * Real spend for this call in US cents, from Synapse if reported, else
+   * estimated. Feeds only the free-tier breaker, never billing
+   */
   costCents: number;
 }
 
@@ -54,8 +60,6 @@ interface SynapseResult {
 
 export interface SynapseClientOptions {
   baseUrl: string;
-  /** Server-side key, used when the input carries no BYOK key. */
-  serverApiKey?: string;
   model: string;
   inputCentsPerMTok: number;
   outputCentsPerMTok: number;
@@ -70,7 +74,6 @@ const optionsFromConfig = (): SynapseClientOptions => {
   const cfg = getAiConfig();
   return {
     baseUrl: cfg.synapseBaseUrl,
-    serverApiKey: cfg.synapseApiKey,
     model: cfg.model,
     inputCentsPerMTok: cfg.rate.inputCentsPerMTok,
     outputCentsPerMTok: cfg.rate.outputCentsPerMTok,
@@ -90,7 +93,6 @@ const callOnce = async (
 
   const client = createSynapseClient({
     baseUrl: opts.baseUrl,
-    apiKey: opts.serverApiKey,
     model: opts.model,
     rate,
     timeoutMs: opts.timeoutMs,
@@ -105,7 +107,7 @@ const callOnce = async (
   });
 
   // The shared client returns null cost only without a rate; Facet always
-  // configures one, so this coercion keeps costCents a number for the meter
+  // configures one, so this coercion keeps costCents a number for the breaker
   const costCents =
     result.usage.costCents ??
     estimateSynapseCostCents(
@@ -134,7 +136,9 @@ const callOnce = async (
  * or the id is unknown), the call degrades once to the concrete fallback model
  * so generation never breaks. A concrete model's failure is a real error and is
  * surfaced, not retried. An explicit per-request model override opts out of the
- * fallback (the caller asked for that exact model)
+ * fallback (the caller asked for that exact model). An out-of-credits refusal
+ * (402) is never retried: the balance is empty for every model, and a retry
+ * would only hide the real state from the user
  */
 export const callSynapse = async (
   input: SynapseCallInput,
@@ -147,7 +151,10 @@ export const callSynapse = async (
   } catch (err) {
     const cfg = getAiConfig();
     const modelOverridden = options?.model !== undefined;
+    const outOfCredits =
+      err instanceof SynapseRequestError && err.status === 402;
     const canFallback =
+      !outOfCredits &&
       !modelOverridden &&
       isVirtualModel(opts.model) &&
       opts.model !== cfg.fallbackModel;

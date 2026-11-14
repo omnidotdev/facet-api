@@ -5,9 +5,9 @@
  * `max` hits fall inside the trailing `windowMs`. In-memory.
  *
  * Phase C left this in-memory on purpose. A shared sliding window needs a
- * store with per-key expiry, which is more than a small change; the per-user
- * credit meter is the durable abuse bound, and this limiter is a per-instance
- * throttle on top of it.
+ * store with per-key expiry, which is more than a small change; the gateway's
+ * per-user credit check and the durable free-tier breaker are the abuse bounds,
+ * and this limiter is a per-instance throttle on top of them.
  * TODO: add a per-user dimension and back this with a shared store so the limit
  * holds across instances
  */

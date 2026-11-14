@@ -12,10 +12,12 @@ import {
   createEventsProvider,
 } from "@omnidotdev/providers";
 
+import { FACET_APP_ID } from "lib/billing/facetBilling";
 import {
   AUTHZ_API_URL,
   AUTH_BASE_URL,
   BILLING_BASE_URL,
+  BILLING_SERVICE_API_KEY,
   VORTEX_API_KEY,
   VORTEX_API_URL,
 } from "lib/config/env.config";
@@ -24,10 +26,19 @@ export const authz = createAuthzProvider({
   apiUrl: AUTHZ_API_URL,
 });
 
-export const billing = createBillingProvider({
-  baseUrl: BILLING_BASE_URL,
-  appId: "platform",
-});
+// Aether for the facet app: the user's tier entitlement and their pooled
+// credit balance. Without BILLING_BASE_URL this degrades to the noop provider
+// (every user reads as free with no known balance)
+export const billing = createBillingProvider(
+  BILLING_BASE_URL
+    ? {
+        provider: "aether",
+        baseUrl: BILLING_BASE_URL,
+        serviceApiKey: BILLING_SERVICE_API_KEY,
+        appId: FACET_APP_ID,
+      }
+    : {},
+);
 
 export const events = createEventsProvider(
   VORTEX_API_URL && VORTEX_API_KEY

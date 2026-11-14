@@ -75,7 +75,7 @@
     "pg": "^8.17.2",
     "postgraphile": "^5.0.0-rc.3",
     "postgraphile-plugin-connection-filter": "^3.0.0-rc.1",
-    "@omnidotdev/providers": "github:omnidotdev/providers#4431477d9a6d30396773114f98638d9918f84bf8"
+    "@omnidotdev/providers": "github:omnidotdev/providers#25a67e59c191999133808fc0c2f0bfbb3b7c4519"
   },
   "overrides": {
     "grafast": "1.0.0-rc.3"

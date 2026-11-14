@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { createSpendBreaker } from "@omnidotdev/providers";
+import { SynapseRequestError } from "@omnidotdev/providers/ai";
 import { Elysia } from "elysia";
 
-import { createSpendBreaker } from "lib/cost/breaker";
 import { createRateLimiter } from "lib/cost/rateLimit";
+import { createFacetProvisioner } from "lib/synapse/provisioner";
 import { createGenerateRoute } from "./generate";
 
-import type { SpendBreaker } from "lib/cost/breaker";
-import type { CreditStore } from "lib/cost/creditStore";
+import type { SpendBreaker } from "@omnidotdev/providers";
 import type { RateLimiter } from "lib/cost/rateLimit";
+import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
 const CODE = "const part = cube(10);\nreturn part;";
 const FENCED = `Here you go:\n\`\`\`ts\n${CODE}\n\`\`\``;
@@ -23,9 +25,10 @@ interface Overrides {
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
-  creditStore?: CreditStore;
   events?: Events;
-  provisioner?: { resolveKey: (userId: string) => Promise<string> };
+  /** null removes the provisioner (provisioning not configured) */
+  provisioner?: ManagedKeyProvisioner | null;
+  tier?: string;
 }
 
 /** Build an events stub that records every emitted event. */
@@ -44,26 +47,16 @@ const makeEvents = () => {
   return { events, emitted };
 };
 
-/**
- * In-memory CreditStore fake. Every user starts at `seedUsed` credits against a
- * shared `capCredits`, and recordSpend accumulates, so the enforcement logic is
- * exercised with no database
- */
-const makeCreditStore = (capCredits = 1000, seedUsed = 0) => {
-  const used = new Map<string, number>();
-  const getCalls: string[] = [];
-  const spendCalls: { userId: string; credits: number }[] = [];
-  const store: CreditStore = {
-    async getMonthlyUsage(userId) {
-      getCalls.push(userId);
-      return { usedCredits: used.get(userId) ?? seedUsed, capCredits };
-    },
-    async recordSpend(userId, credits) {
-      spendCalls.push({ userId, credits });
-      used.set(userId, (used.get(userId) ?? seedUsed) + credits);
+/** A provisioner fake that records each resolveKey call and returns a scoped key */
+const makeProvisioner = () => {
+  const calls: unknown[][] = [];
+  const provisioner: ManagedKeyProvisioner = {
+    async resolveKey(...args) {
+      calls.push(args);
+      return `sk-scoped-${args[0]}`;
     },
   };
-  return { store, getCalls, spendCalls };
+  return { provisioner, calls };
 };
 
 /** Build an authenticate stub that records how many times it ran. */
@@ -91,8 +84,22 @@ const makeCaller = (
   return { caller, calls };
 };
 
+/** A caller that fails the way the gateway does, with its HTTP status */
+const refusingCaller = (status: number) => {
+  const calls: { apiKey?: string }[] = [];
+  const caller = (async (input: { apiKey?: string }) => {
+    calls.push({ apiKey: input.apiKey });
+    throw new SynapseRequestError(
+      `synapse request failed: status ${status}`,
+      status,
+    );
+  }) as Caller;
+  return { caller, calls };
+};
+
 const makeApp = (overrides: Overrides = {}) => {
   const caller = overrides.caller ?? makeCaller(FENCED).caller;
+  const tierCalls: string[] = [];
   const app = new Elysia().use(
     createGenerateRoute({
       callSynapse: caller,
@@ -104,14 +111,19 @@ const makeApp = (overrides: Overrides = {}) => {
       authenticate:
         overrides.authenticate ??
         makeAuthenticator({ userId: "user-1" }).authenticate,
-      // default to a generous cap so managed-path tests are not credit-blocked
-      creditStore: overrides.creditStore ?? makeCreditStore().store,
       events: overrides.events,
-      provisioner: overrides.provisioner,
+      provisioner:
+        overrides.provisioner === null
+          ? undefined
+          : (overrides.provisioner ?? makeProvisioner().provisioner),
+      resolveTier: async (userId) => {
+        tierCalls.push(userId);
+        return overrides.tier ?? "free";
+      },
     }),
   );
 
-  return (body: unknown, headers: Record<string, string> = {}) =>
+  const request = (body: unknown, headers: Record<string, string> = {}) =>
     app.handle(
       new Request("http://test/generate", {
         method: "POST",
@@ -119,15 +131,15 @@ const makeApp = (overrides: Overrides = {}) => {
         body: JSON.stringify(body),
       }),
     );
+  return Object.assign(request, { tierCalls });
 };
 
 const ENV_KEYS = [
-  "SYNAPSE_API_KEY",
+  "SYNAPSE_API_URL",
+  "SYNAPSE_GATEWAY_SECRET",
   "MAX_PROMPT_CHARS",
   "MAX_OUTPUT_TOKENS",
   "MAX_REPAIR_ATTEMPTS",
-  "CREDIT_COGS_MARKUP",
-  "FREE_MONTHLY_CREDITS",
   "FACET_MANAGED_ALLOWLIST",
 ] as const;
 let snapshot: Record<string, string | undefined> = {};
@@ -141,8 +153,9 @@ beforeEach(() => {
     snapshot[k] = process.env[k];
     delete process.env[k];
   }
-  // managed path enabled by default
-  process.env.SYNAPSE_API_KEY = "server-key-secret";
+  // managed path enabled by default (product-scoped provisioning configured)
+  process.env.SYNAPSE_API_URL = "https://api.synapse.test";
+  process.env.SYNAPSE_GATEWAY_SECRET = "gw-secret";
   process.env.MAX_PROMPT_CHARS = "2000";
   process.env.MAX_REPAIR_ATTEMPTS = "2";
 });
@@ -155,32 +168,160 @@ afterEach(() => {
 });
 
 describe("POST /generate", () => {
-  test("happy path extracts the fenced code and computes credits", async () => {
+  test("happy path extracts the fenced code and reports no local credit math", async () => {
     const request = makeApp();
     const res = await request({ prompt: "a 10mm cube" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.code).toBe(CODE);
-    // 1.4 cents * 2.0 markup -> ceil -> 3 credits (a credit is a retail unit)
-    expect(json.usage.credits).toBe(3);
-    expect(json.usage.costCents).toBeCloseTo(1.4, 5);
+    // billing is the gateway's: the response carries no locally computed credits
+    expect(json.usage).toBeUndefined();
+    expect(JSON.stringify(json)).not.toContain("credits");
+  });
+
+  describe("product-scoped managed key", () => {
+    test("provisions a key billed to the user and calls the gateway with it", async () => {
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, provisioner });
+
+      const res = await request({ prompt: "a 10mm cube" });
+
+      expect(res.status).toBe(200);
+      expect(provisionCalls).toEqual([
+        ["user-1", undefined, { entityType: "user", entityId: "user-1" }],
+      ]);
+      expect(calls[0]!.apiKey).toBe("sk-scoped-user-1");
+    });
+
+    test("the provisioning request is scoped to the facet app and the user", async () => {
+      const userId = "6f1c2a8e-4b7d-4e2a-9c1f-0a1b2c3d4e5f";
+      const bodies: Record<string, unknown>[] = [];
+      const provisioner = createFacetProvisioner({
+        apiUrl: "https://api.synapse.test",
+        gatewaySecret: "gw-secret",
+        fetchImpl: (async (_url: string, init?: RequestInit) => {
+          bodies.push(JSON.parse(String(init?.body)));
+          return new Response(JSON.stringify({ apiKey: "sk-facet-user" }));
+        }) as unknown as typeof fetch,
+      });
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        provisioner,
+        authenticate: makeAuthenticator({ userId }).authenticate,
+      });
+
+      const res = await request({ prompt: "a 10mm cube" });
+
+      expect(res.status).toBe(200);
+      expect(bodies).toEqual([
+        {
+          identityProviderId: userId,
+          source: "Facet",
+          appId: "facet",
+          billingEntity: { entityType: "user", entityId: userId },
+        },
+      ]);
+      expect(calls[0]!.apiKey).toBe("sk-facet-user");
+    });
+
+    test("a provisioning failure is a 503 with no gateway call (never a shared key)", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        provisioner: {
+          resolveKey: async () => {
+            throw new Error("synapse-api down");
+          },
+        },
+      });
+
+      const res = await request({ prompt: "a 10mm cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("managed generation is a 503 when provisioning is not configured", async () => {
+      delete process.env.SYNAPSE_GATEWAY_SECRET;
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("managed generation is a 503 when no provisioner is wired", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, provisioner: null });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe("gateway refusals", () => {
+    test("a gateway 402 (empty balance) surfaces as the out-of-credits 402", async () => {
+      const { caller, calls } = refusingCaller(402);
+      const breaker = createSpendBreaker(500);
+      const request = makeApp({ caller, breaker });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(402);
+      const json = await res.json();
+      expect(json.error).toMatch(/out of AI credits/i);
+      expect(calls).toHaveLength(1);
+      // nothing was spent, so nothing is recorded
+      expect(await breaker.spentTodayCents()).toBe(0);
+    });
+
+    test("a gateway 503 surfaces as temporarily unavailable", async () => {
+      const request = makeApp({ caller: refusingCaller(503).caller });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      const json = await res.json();
+      expect(json.error).toMatch(/temporarily unavailable/i);
+    });
+
+    test("any other gateway failure is a generic 502 that never leaks detail", async () => {
+      const caller = (async () => {
+        throw new Error("synapse request failed: status 500 provider xyz");
+      }) as Caller;
+      const request = makeApp({ caller });
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(502);
+      const text = await res.text();
+      expect(text).not.toContain("provider xyz");
+      expect(text).not.toContain("synapse");
+    });
   });
 
   describe("managed allowlist (limited preview)", () => {
     test("refuses a signed-in user who is not on the allowlist", async () => {
       process.env.FACET_MANAGED_ALLOWLIST = "owner-123, owner-456";
       const { caller, calls } = makeCaller(FENCED);
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
       const request = makeApp({
         caller,
+        provisioner,
         authenticate: makeAuthenticator({ userId: "random-user" }).authenticate,
       });
 
       const res = await request({ prompt: "a cube" });
 
       expect(res.status).toBe(403);
-      // the managed key is never spent for a non-allowlisted user
       expect(calls).toHaveLength(0);
+      expect(provisionCalls).toHaveLength(0);
     });
 
     test("allows a user who is on the allowlist", async () => {
@@ -195,7 +336,6 @@ describe("POST /generate", () => {
     });
 
     test("does not restrict anyone when the allowlist is unset", async () => {
-      // no FACET_MANAGED_ALLOWLIST set
       const request = makeApp({
         authenticate: makeAuthenticator({ userId: "anyone" }).authenticate,
       });
@@ -204,48 +344,105 @@ describe("POST /generate", () => {
 
       expect(res.status).toBe(200);
     });
+  });
 
-    test("BYOK bypasses the allowlist entirely (caller's own key, no cost to us)", async () => {
-      process.env.FACET_MANAGED_ALLOWLIST = "owner-123";
-      const { caller, calls } = makeCaller(FENCED);
-      const request = makeApp({ caller });
+  describe("free-tier daily breaker", () => {
+    test("records a free user's real spend (gateway or estimate) in the breaker", async () => {
+      const breaker = createSpendBreaker(500);
+      const request = makeApp({
+        caller: makeCaller(FENCED, 3).caller,
+        breaker,
+      });
 
-      const res = await request({ prompt: "a cube", byokKey: "sk-user-key" });
+      const res = await request({ prompt: "a cube" });
 
       expect(res.status).toBe(200);
-      // BYOK forwards the caller's key, not ours
-      expect(calls[0]?.apiKey).toBe("sk-user-key");
+      expect(await breaker.spentTodayCents()).toBe(3);
+    });
+
+    test("a tripped breaker blocks a free user before provisioning or any call", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100);
+      const { caller, calls } = makeCaller(FENCED);
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const request = makeApp({ caller, breaker, provisioner });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
+      expect(provisionCalls).toHaveLength(0);
+    });
+
+    test("a paid tier is served even when the free-tier breaker is tripped", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100);
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, breaker, tier: "pro" });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    test("paid spend is never recorded against the free breaker", async () => {
+      const breaker = createSpendBreaker(500);
+      const request = makeApp({
+        caller: makeCaller(FENCED, 5).caller,
+        breaker,
+        tier: "pro",
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      expect(await breaker.spentTodayCents()).toBe(0);
+    });
+
+    test("the tier is resolved for the signed-in user", async () => {
+      const request = makeApp({
+        authenticate: makeAuthenticator({ userId: "user-42" }).authenticate,
+      });
+
+      await request({ prompt: "a cube" });
+
+      expect(request.tierCalls).toEqual(["user-42"]);
     });
   });
 
-  test("a credit is a retail unit: debits ceil(costCents * markup), breaker tracks real cents", async () => {
-    const { caller } = makeCaller(FENCED, 5); // 5 cents of real model spend
-    // a free-tier user (cap at the default free allowance of 100), so their
-    // real-cent spend is tracked by the global breaker
-    const { store, spendCalls } = makeCreditStore(100);
-    const breaker = createSpendBreaker(500);
-    const request = makeApp({ caller, creditStore: store, breaker });
+  describe("BYOK (unchanged: the caller's own key, no managed gating)", () => {
+    test("forwards the caller's key and skips auth, tier, breaker and provisioning", async () => {
+      delete process.env.SYNAPSE_GATEWAY_SECRET; // managed path disabled
+      process.env.FACET_MANAGED_ALLOWLIST = "owner-123";
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100); // tripped
+      const { authenticate, calls: authCalls } = makeAuthenticator(null);
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, breaker, authenticate, provisioner });
 
-    const res = await request({ prompt: "a 10mm cube" });
-    expect(res.status).toBe(200);
-    // default markup is 2.0, so 5 real cents bills 10 credits to the ledger
-    expect(spendCalls).toEqual([{ userId: "user-1", credits: 10 }]);
-    // the money-safety breaker records REAL cents, never the marked-up credits
-    expect(await breaker.spentTodayCents()).toBe(5);
+      const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
+
+      expect(res.status).toBe(200);
+      expect(calls).toEqual([{ apiKey: "byok-xyz" }]);
+      expect(authCalls.count).toBe(0);
+      expect(provisionCalls).toHaveLength(0);
+      expect(request.tierCalls).toHaveLength(0);
+      // BYOK spend is not recorded against our breaker
+      expect(await breaker.spentTodayCents()).toBe(100);
+    });
+
+    test("a BYOK upstream failure stays a generic 502", async () => {
+      const request = makeApp({ caller: refusingCaller(402).caller });
+
+      const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
+
+      expect(res.status).toBe(502);
+    });
   });
 
-  test("CREDIT_COGS_MARKUP overrides the markup (1.0 bills at cost)", async () => {
-    process.env.CREDIT_COGS_MARKUP = "1";
-    const { caller } = makeCaller(FENCED, 5);
-    const { store, spendCalls } = makeCreditStore();
-    const request = makeApp({ caller, creditStore: store });
-
-    const res = await request({ prompt: "a 10mm cube" });
-    expect(res.status).toBe(200);
-    expect(spendCalls).toEqual([{ userId: "user-1", credits: 5 }]);
-  });
-
-  test("emits facet.generation.completed with usage metadata (no prompt/code)", async () => {
+  test("emits facet.generation.completed with usage metadata (no prompt/code, no credits)", async () => {
     const { events, emitted } = makeEvents();
     const request = makeApp({ events });
     const res = await request({ prompt: "a 10mm cube" });
@@ -262,53 +459,17 @@ describe("POST /generate", () => {
       userId: "user-1",
       inputTokens: 100,
       outputTokens: 50,
-      credits: 3,
       repaired: false,
     });
+    expect(event.data.credits).toBeUndefined();
     // never leak the prompt or the generated code into telemetry
     const serialized = JSON.stringify(event.data);
     expect(serialized).not.toContain("10mm cube");
     expect(serialized).not.toContain(CODE);
   });
 
-  test("per-user managed key: provisioned key is used for Synapse AND the ledger still meters", async () => {
-    const { caller, calls } = makeCaller(FENCED);
-    const { store, spendCalls } = makeCreditStore();
-    const request = makeApp({
-      caller,
-      creditStore: store,
-      provisioner: { resolveKey: async (u) => `sk-${u}` },
-    });
-
-    const res = await request({ prompt: "a 10mm cube" });
-    expect(res.status).toBe(200);
-    // the per-user key reached Synapse (not the shared server key)
-    expect(calls[0]!.apiKey).toBe("sk-user-1");
-    // the local credit ledger STILL enforced/metered (hard-cap safety net)
-    expect(spendCalls).toHaveLength(1);
-    expect(spendCalls[0]!.userId).toBe("user-1");
-  });
-
-  test("per-user provisioning failure falls back to the shared key and still succeeds", async () => {
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({
-      caller,
-      provisioner: {
-        resolveKey: async () => {
-          throw new Error("synapse-api down");
-        },
-      },
-    });
-
-    const res = await request({ prompt: "a 10mm cube" });
-    expect(res.status).toBe(200);
-    // fell back to the shared server key (undefined apiKey -> client uses server key)
-    expect(calls[0]!.apiKey).toBeUndefined();
-  });
-
   test("a failed generation emits no event", async () => {
     const { events, emitted } = makeEvents();
-    // a caller that returns no fenced block -> 422, so nothing should emit
     const request = makeApp({
       events,
       caller: makeCaller("no code here").caller,
@@ -341,100 +502,6 @@ describe("POST /generate", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("returns 503 when the managed path is disabled and no BYOK key is given", async () => {
-    process.env.SYNAPSE_API_KEY = "";
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(503);
-    expect(calls).toHaveLength(0);
-  });
-
-  test("returns 503 when the daily breaker is tripped (free-tier managed path)", async () => {
-    const breaker = createSpendBreaker(100);
-    await breaker.record(100);
-    const { caller, calls } = makeCaller(FENCED);
-    // a free-tier user (cap at the free allowance) is gated by the breaker
-    const request = makeApp({
-      caller,
-      breaker,
-      creditStore: makeCreditStore(100).store,
-    });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(503);
-    expect(calls).toHaveLength(0);
-  });
-
-  describe("free-tier breaker insulation (paid users are not blocked by free abuse)", () => {
-    test("a paid user (cap above the free allowance) is served even when the free-tier breaker is tripped", async () => {
-      const breaker = createSpendBreaker(100);
-      await breaker.record(100); // tripped
-      const { caller, calls } = makeCaller(FENCED);
-      const request = makeApp({
-        caller,
-        breaker,
-        creditStore: makeCreditStore(2000).store, // paid cap, above the free 100
-      });
-
-      const res = await request({ prompt: "a cube" });
-
-      // bounded by their own revenue-backed per-user cap, not the free ceiling
-      expect(res.status).toBe(200);
-      expect(calls).toHaveLength(1);
-    });
-
-    test("paid spend is metered to the user ledger but never recorded against the free breaker", async () => {
-      const breaker = createSpendBreaker(500); // not tripped
-      const { store, spendCalls } = makeCreditStore(2000); // paid
-      const request = makeApp({
-        caller: makeCaller(FENCED, 5).caller,
-        breaker,
-        creditStore: store,
-      });
-
-      const res = await request({ prompt: "a cube" });
-
-      expect(res.status).toBe(200);
-      // the per-user ledger still meters (the hard-cap safety net)
-      expect(spendCalls).toHaveLength(1);
-      // but the global free-tier breaker is untouched by paid spend
-      expect(await breaker.spentTodayCents()).toBe(0);
-    });
-
-    test("a free user (cap at the free allowance) is still blocked by a tripped breaker", async () => {
-      const breaker = createSpendBreaker(100);
-      await breaker.record(100); // tripped
-      const { caller, calls } = makeCaller(FENCED);
-      const request = makeApp({
-        caller,
-        breaker,
-        creditStore: makeCreditStore(100).store, // free cap == the free allowance
-      });
-
-      const res = await request({ prompt: "a cube" });
-
-      expect(res.status).toBe(503);
-      expect(calls).toHaveLength(0);
-    });
-  });
-
-  test("BYOK path bypasses the breaker and the managed-disabled check", async () => {
-    process.env.SYNAPSE_API_KEY = "";
-    const breaker = createSpendBreaker(100);
-    await breaker.record(100); // tripped
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, breaker });
-    const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
-
-    expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.apiKey).toBe("byok-xyz");
-    // BYOK spend is not recorded against our breaker
-    expect(await breaker.spentTodayCents()).toBe(100);
-  });
-
   test("managed path with no identity returns a generic 401 and never calls Synapse", async () => {
     const { authenticate, calls: authCalls } = makeAuthenticator(null);
     const { caller, calls } = makeCaller(FENCED);
@@ -446,84 +513,6 @@ describe("POST /generate", () => {
     expect(typeof json.error).toBe("string");
     expect(authCalls.count).toBe(1);
     expect(calls).toHaveLength(0);
-  });
-
-  test("managed path with a valid identity authenticates and proceeds", async () => {
-    const { authenticate, calls: authCalls } = makeAuthenticator({
-      userId: "user-42",
-    });
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, authenticate });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(200);
-    expect(authCalls.count).toBe(1);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("BYOK path skips authentication entirely", async () => {
-    const { authenticate, calls: authCalls } = makeAuthenticator(null);
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, authenticate });
-    const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
-
-    expect(res.status).toBe(200);
-    expect(authCalls.count).toBe(0);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("managed path over the monthly credit cap returns a generic 402 and never calls Synapse", async () => {
-    const { store, spendCalls } = makeCreditStore(100, 100); // used == cap
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, creditStore: store });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(402);
-    const json = await res.json();
-    expect(typeof json.error).toBe("string");
-    expect(calls).toHaveLength(0);
-    expect(spendCalls).toHaveLength(0);
-  });
-
-  test("managed success records the spent credits against the user", async () => {
-    const { store, getCalls, spendCalls } = makeCreditStore(1000, 0);
-    const { authenticate } = makeAuthenticator({ userId: "user-42" });
-    // 3 cents * 2.0 markup -> ceil -> 6 credits
-    const { caller } = makeCaller(FENCED, 3);
-    const request = makeApp({ caller, authenticate, creditStore: store });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(200);
-    expect(getCalls).toEqual(["user-42"]);
-    expect(spendCalls).toEqual([{ userId: "user-42", credits: 6 }]);
-  });
-
-  test("BYOK path never touches the credit meter", async () => {
-    const { store, getCalls, spendCalls } = makeCreditStore(100, 100); // over cap
-    const { caller, calls } = makeCaller(FENCED);
-    const request = makeApp({ caller, creditStore: store });
-    const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
-
-    expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expect(getCalls).toHaveLength(0);
-    expect(spendCalls).toHaveLength(0);
-  });
-
-  test("managed path forwards no BYOK key and records free spend in the breaker", async () => {
-    const breaker = createSpendBreaker(500);
-    const { caller, calls } = makeCaller(FENCED, 3);
-    // a free-tier user, whose real-cent spend the global breaker tracks
-    const request = makeApp({
-      caller,
-      breaker,
-      creditStore: makeCreditStore(100).store,
-    });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(200);
-    expect(calls[0]!.apiKey).toBeUndefined();
-    expect(await breaker.spentTodayCents()).toBe(3);
   });
 
   test("returns 422 when the model emits no fenced code block", async () => {
@@ -545,24 +534,11 @@ describe("POST /generate", () => {
     expect((await request({ prompt: "a cube" }, headers)).status).toBe(429);
   });
 
-  test("returns a generic 502 on an upstream failure and never leaks detail", async () => {
-    const caller = (async () => {
-      throw new Error("synapse request failed: status 500 provider xyz");
-    }) as Caller;
-    const request = makeApp({ caller });
-    const res = await request({ prompt: "a cube" });
-
-    expect(res.status).toBe(502);
-    const text = await res.text();
-    expect(text).not.toContain("provider xyz");
-    expect(text).not.toContain("synapse");
-  });
-
-  test("never echoes the server Synapse key in the response", async () => {
+  test("never echoes the managed key in the response", async () => {
     const request = makeApp();
     const res = await request({ prompt: "a cube" });
     const text = await res.text();
-    expect(text).not.toContain("server-key-secret");
+    expect(text).not.toContain("sk-scoped");
   });
 
   test("forwards repair context and enforces the repair-attempt ceiling", async () => {

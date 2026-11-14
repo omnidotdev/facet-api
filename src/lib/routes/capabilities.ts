@@ -1,13 +1,17 @@
+import { creditsFromBalanceUsd } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
 
-import type { CreditStore } from "lib/cost/creditStore";
+import type { BillingProvider } from "@omnidotdev/providers";
+import type { TierResolver } from "lib/billing/facetBilling";
 
 interface CapabilitiesDeps {
   authenticate: (request: Request) => Promise<{ userId: string } | null>;
-  /** Per-user monthly credit meter, to report the remaining managed balance. */
-  creditStore: CreditStore;
+  /** Aether, for the user's pooled credit balance */
+  billing: Pick<BillingProvider, "getCreditBalance">;
+  /** Resolve the user's Facet tier from Aether (free on any failure) */
+  resolveTier: TierResolver;
 }
 
 /**
@@ -18,9 +22,11 @@ interface CapabilitiesDeps {
  * only to users who can actually use managed generation, instead of showing it
  * to everyone and relying on a 403 after the fact.
  *
- * For a user who can spend managed credits it also returns the monthly balance
- * (used / cap / remaining), so the UI can show how many generations are left
- * and give the per-generation credit cost meaning rather than a bare number.
+ * For a user who can use managed generation it also returns their tier and
+ * their real credit balance: ONE pooled Aether balance per billing account,
+ * shared across every Omni product, converted from retail USD to whole display
+ * credits with the shared helper (rounded down, never overstated). Facet keeps
+ * no ledger of its own; the gateway debits this balance
  */
 export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
   new Elysia().get("/capabilities", async ({ request }) => {
@@ -28,8 +34,8 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
     const identity = await deps.authenticate(request).catch(() => null);
 
     // Mirror the managed gate in the generate route: managed is available when
-    // the key is configured, the user is signed in, and either no allowlist is
-    // set (open) or the user is on it
+    // provisioning is configured, the user is signed in, and either no
+    // allowlist is set (open) or the user is on it
     const allowlisted =
       cfg.managedAllowlist.length === 0 ||
       (identity !== null && cfg.managedAllowlist.includes(identity.userId));
@@ -37,26 +43,26 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
     const managedGeneration =
       cfg.managedEnabled && identity !== null && allowlisted;
 
-    // The monthly managed credit balance, only for a user who can actually
-    // spend it. A meter failure degrades to omitting the balance, never blocks
-    // the capability probe
-    let credits: { used: number; cap: number; remaining: number } | undefined;
-    if (managedGeneration && identity) {
-      try {
-        const usage = await deps.creditStore.getMonthlyUsage(identity.userId);
-        credits = {
-          used: usage.usedCredits,
-          cap: usage.capCredits,
-          remaining: Math.max(0, usage.capCredits - usage.usedCredits),
-        };
-      } catch {
-        // omit the balance on any meter failure; the panel still works without it
-      }
+    if (!managedGeneration || !identity) {
+      return { signedIn: identity !== null, managedGeneration };
     }
 
+    // A balance or tier lookup failure degrades to omitting it, never blocks
+    // the capability probe
+    const [tier, balance] = await Promise.all([
+      deps.resolveTier(identity.userId),
+      deps.billing
+        .getCreditBalance("user", identity.userId)
+        .then((result) =>
+          result ? creditsFromBalanceUsd(result.balance) : null,
+        )
+        .catch(() => null),
+    ]);
+
     return {
-      signedIn: identity !== null,
+      signedIn: true,
       managedGeneration,
-      ...(credits ? { credits } : {}),
+      tier,
+      ...(balance !== null ? { credits: { balance } } : {}),
     };
   });

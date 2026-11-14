@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { SynapseRequestError } from "@omnidotdev/providers/ai";
+
 import { callSynapse } from "./client";
 
 import type { SynapseClientOptions } from "./client";
@@ -42,7 +44,6 @@ const anthropicResponse = (text: string, input = 100, output = 50) => ({
 
 const baseOpts: SynapseClientOptions = {
   baseUrl: "https://synapse.test",
-  serverApiKey: "server-key",
   model: "claude-opus-5-5",
   inputCentsPerMTok: 400,
   outputCentsPerMTok: 2000,
@@ -57,6 +58,7 @@ describe("callSynapse", () => {
         system: "SYS",
         messages: [{ role: "user", content: "hi" }],
         maxTokens: 1234,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
@@ -75,7 +77,7 @@ describe("callSynapse", () => {
     expect(sent.top_p).toBeUndefined();
   });
 
-  test("uses the server key when no BYOK key is given", async () => {
+  test("sends the per-call key (the product-scoped managed key)", async () => {
     const { fetchImpl, calls } = mockFetch(anthropicResponse("x"));
 
     await callSynapse(
@@ -83,16 +85,34 @@ describe("callSynapse", () => {
         system: "s",
         messages: [{ role: "user", content: "p" }],
         maxTokens: 10,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
 
     const headers = new Headers(calls[0]!.init.headers);
-    expect(headers.get("x-api-key")).toBe("server-key");
-    expect(headers.get("authorization")).toBe("Bearer server-key");
+    expect(headers.get("x-api-key")).toBe("sk-scoped");
+    expect(headers.get("authorization")).toBe("Bearer sk-scoped");
   });
 
-  test("uses the BYOK key when provided and never the server key", async () => {
+  test("surfaces the gateway status on a refusal (402 out of credits, 503 unavailable)", async () => {
+    for (const status of [402, 503]) {
+      const { fetchImpl } = mockFetch({ error: "nope" }, status);
+      const call = callSynapse(
+        {
+          system: "s",
+          messages: [{ role: "user", content: "p" }],
+          maxTokens: 10,
+          apiKey: "sk-scoped",
+        },
+        { ...baseOpts, fetchImpl },
+      );
+      await expect(call).rejects.toBeInstanceOf(SynapseRequestError);
+      await expect(call).rejects.toMatchObject({ status });
+    }
+  });
+
+  test("uses the BYOK key when provided", async () => {
     const { fetchImpl, calls } = mockFetch(anthropicResponse("x"));
 
     await callSynapse(
@@ -108,7 +128,6 @@ describe("callSynapse", () => {
     const headers = new Headers(calls[0]!.init.headers);
     expect(headers.get("x-api-key")).toBe("byok-123");
     expect(headers.get("authorization")).toBe("Bearer byok-123");
-    expect(String(calls[0]!.init.body)).not.toContain("server-key");
   });
 
   test("parses the first text block and token usage", async () => {
@@ -121,6 +140,7 @@ describe("callSynapse", () => {
         system: "s",
         messages: [{ role: "user", content: "p" }],
         maxTokens: 10,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
@@ -140,6 +160,7 @@ describe("callSynapse", () => {
         system: "s",
         messages: [{ role: "user", content: "p" }],
         maxTokens: 10,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
@@ -164,6 +185,7 @@ describe("callSynapse", () => {
         system: "s",
         messages: [{ role: "user", content: "p" }],
         maxTokens: 10,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
@@ -179,6 +201,7 @@ describe("callSynapse", () => {
         system: "s",
         messages: [{ role: "user", content: "p" }],
         maxTokens: 10,
+        apiKey: "sk-scoped",
       },
       { ...baseOpts, fetchImpl },
     );
@@ -194,6 +217,7 @@ describe("callSynapse", () => {
  */
 const modelAwareFetch = (
   rejectModel: string,
+  rejectStatus = 404,
 ): { fetchImpl: typeof fetch; models: string[] } => {
   const models: string[] = [];
   const fetchImpl = (async (
@@ -204,7 +228,7 @@ const modelAwareFetch = (
     models.push(model);
     if (model === rejectModel)
       return new Response(JSON.stringify({ error: "model not available" }), {
-        status: 404,
+        status: rejectStatus,
         headers: { "content-type": "application/json" },
       });
     return new Response(JSON.stringify(anthropicResponse("ok")), {
@@ -216,11 +240,7 @@ const modelAwareFetch = (
 };
 
 describe("callSynapse virtual-model routing fallback", () => {
-  const ENV_KEYS = [
-    "FACET_AI_MODEL",
-    "FACET_AI_FALLBACK_MODEL",
-    "SYNAPSE_API_KEY",
-  ] as const;
+  const ENV_KEYS = ["FACET_AI_MODEL", "FACET_AI_FALLBACK_MODEL"] as const;
   let snapshot: Record<string, string | undefined> = {};
 
   const setEnv = () => {
@@ -244,7 +264,6 @@ describe("callSynapse virtual-model routing fallback", () => {
     try {
       process.env.FACET_AI_MODEL = "auto";
       process.env.FACET_AI_FALLBACK_MODEL = FALLBACK;
-      process.env.SYNAPSE_API_KEY = "server-key";
       const { fetchImpl, models } = modelAwareFetch("auto");
 
       const result = await callSynapse(
@@ -252,6 +271,7 @@ describe("callSynapse virtual-model routing fallback", () => {
           system: "s",
           messages: [{ role: "user", content: "p" }],
           maxTokens: 10,
+          apiKey: "sk-scoped",
         },
         { fetchImpl },
       );
@@ -268,7 +288,6 @@ describe("callSynapse virtual-model routing fallback", () => {
     try {
       process.env.FACET_AI_MODEL = "auto";
       process.env.FACET_AI_FALLBACK_MODEL = FALLBACK;
-      process.env.SYNAPSE_API_KEY = "server-key";
       // Reject a model nobody uses, so `auto` succeeds on the first call
       const { fetchImpl, models } = modelAwareFetch("never");
 
@@ -277,6 +296,7 @@ describe("callSynapse virtual-model routing fallback", () => {
           system: "s",
           messages: [{ role: "user", content: "p" }],
           maxTokens: 10,
+          apiKey: "sk-scoped",
         },
         { fetchImpl },
       );
@@ -293,7 +313,6 @@ describe("callSynapse virtual-model routing fallback", () => {
       process.env.FACET_AI_MODEL = FALLBACK; // a concrete routed model
       process.env.FACET_AI_FALLBACK_MODEL =
         "anthropic/claude-haiku-4-5-20251001";
-      process.env.SYNAPSE_API_KEY = "server-key";
       const { fetchImpl, models } = modelAwareFetch(FALLBACK);
 
       const call = callSynapse(
@@ -301,12 +320,37 @@ describe("callSynapse virtual-model routing fallback", () => {
           system: "s",
           messages: [{ role: "user", content: "p" }],
           maxTokens: 10,
+          apiKey: "sk-scoped",
         },
         { fetchImpl },
       );
 
       await expect(call).rejects.toThrow(/synapse request failed/i);
       expect(models).toEqual([FALLBACK]);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  test("an out-of-credits refusal (402) is never retried on the backup model", async () => {
+    setEnv();
+    try {
+      process.env.FACET_AI_MODEL = "auto";
+      process.env.FACET_AI_FALLBACK_MODEL = FALLBACK;
+      const { fetchImpl, models } = modelAwareFetch("auto", 402);
+
+      const call = callSynapse(
+        {
+          system: "s",
+          messages: [{ role: "user", content: "p" }],
+          maxTokens: 10,
+          apiKey: "sk-scoped",
+        },
+        { fetchImpl },
+      );
+
+      await expect(call).rejects.toMatchObject({ status: 402 });
+      expect(models).toEqual(["auto"]);
     } finally {
       restoreEnv();
     }

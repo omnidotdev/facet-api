@@ -4,12 +4,12 @@ import { getAiConfig } from "./ai.config";
 
 const KEYS = [
   "SYNAPSE_BASE_URL",
-  "SYNAPSE_API_KEY",
+  "SYNAPSE_API_URL",
+  "SYNAPSE_GATEWAY_SECRET",
   "FACET_AI_MODEL",
   "MAX_PROMPT_CHARS",
   "MAX_OUTPUT_TOKENS",
   "DAILY_SPEND_CEILING_CENTS",
-  "FREE_MONTHLY_CREDITS",
   "RATE_LIMIT_WINDOW_MS",
   "RATE_LIMIT_MAX",
 ] as const;
@@ -32,16 +32,14 @@ afterEach(() => {
 });
 
 describe("getAiConfig", () => {
-  test("boots with safe defaults and the managed path disabled when no key is set", () => {
+  test("boots with safe defaults and the managed path disabled when provisioning is unset", () => {
     const cfg = getAiConfig();
     expect(cfg.managedEnabled).toBe(false);
-    expect(cfg.synapseApiKey).toBeUndefined();
     expect(cfg.model).toBe("auto");
     expect(cfg.fallbackModel).toBe("anthropic/claude-sonnet-4-5-20250929");
     expect(cfg.maxPromptChars).toBe(2000);
     expect(cfg.maxOutputTokens).toBe(2048);
     expect(cfg.dailySpendCeilingCents).toBe(500);
-    expect(cfg.freeMonthlyCredits).toBe(100);
     expect(cfg.maxRepairAttempts).toBe(2);
     expect(cfg.rateLimitWindowMs).toBe(60_000);
     expect(cfg.rateLimitMax).toBe(20);
@@ -53,7 +51,7 @@ describe("getAiConfig", () => {
     // virtual model) must still be a provider-prefixed id with an explicit rate:
     // a bare id like "claude-sonnet-5-5" 404s at the gateway, which only accepts
     // provider-prefixed ids (e.g. anthropic/...), and the rate must not be the
-    // conservative opus-tier default
+    // conservative default
     const cfg = getAiConfig();
     expect(cfg.model).toBe("auto");
     expect(cfg.fallbackModel).toMatch(/^[a-z0-9-]+\/.+/);
@@ -63,9 +61,14 @@ describe("getAiConfig", () => {
     });
   });
 
-  test("enables the managed path once a server key is present", () => {
-    process.env.SYNAPSE_API_KEY = "server-key";
-    expect(getAiConfig().managedEnabled).toBe(true);
+  test("enables the managed path only when provisioning is fully configured", () => {
+    process.env.SYNAPSE_API_URL = "https://api.synapse.test/";
+    expect(getAiConfig().managedEnabled).toBe(false);
+
+    process.env.SYNAPSE_GATEWAY_SECRET = "gw-secret";
+    const cfg = getAiConfig();
+    expect(cfg.managedEnabled).toBe(true);
+    expect(cfg.synapseApiUrl).toBe("https://api.synapse.test");
   });
 
   test("strips a trailing slash from the base url", () => {
@@ -81,7 +84,7 @@ describe("getAiConfig", () => {
     expect(cfg.maxOutputTokens).toBe(2048);
   });
 
-  test("resolves the spend rate for the active model with a conservative fallback", () => {
+  test("resolves the breaker estimate rate for the active model with a conservative fallback", () => {
     process.env.FACET_AI_MODEL = "anthropic/claude-haiku-4-5-20251001";
     expect(getAiConfig().rate).toEqual({
       inputCentsPerMTok: 100,
