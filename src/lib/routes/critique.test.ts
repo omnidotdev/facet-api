@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { createSpendBreaker } from "@omnidotdev/providers";
+import { SynapseRequestError } from "@omnidotdev/providers/ai";
 import { Elysia } from "elysia";
 
-import { createSpendBreaker } from "lib/cost/breaker";
 import { createRateLimiter } from "lib/cost/rateLimit";
 import { createCritiqueRoute } from "./critique";
 
-import type { SpendBreaker } from "lib/cost/breaker";
-import type { CreditStore } from "lib/cost/creditStore";
+import type { SpendBreaker } from "@omnidotdev/providers";
 import type { RateLimiter } from "lib/cost/rateLimit";
+import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
 type Caller = Parameters<typeof createCritiqueRoute>[0]["callSynapse"];
 type Authenticate = Parameters<typeof createCritiqueRoute>[0]["authenticate"];
@@ -27,23 +28,19 @@ interface Overrides {
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
-  creditStore?: CreditStore;
-  provisioner?: { resolveKey: (userId: string) => Promise<string> };
+  provisioner?: ManagedKeyProvisioner;
+  tier?: string;
 }
 
-const makeCreditStore = (capCredits = 1000, seedUsed = 0) => {
-  const used = new Map<string, number>();
-  const spendCalls: { userId: string; credits: number }[] = [];
-  const store: CreditStore = {
-    async getMonthlyUsage(userId) {
-      return { usedCredits: used.get(userId) ?? seedUsed, capCredits };
-    },
-    async recordSpend(userId, credits) {
-      spendCalls.push({ userId, credits });
-      used.set(userId, (used.get(userId) ?? seedUsed) + credits);
+const makeProvisioner = () => {
+  const calls: unknown[][] = [];
+  const provisioner: ManagedKeyProvisioner = {
+    async resolveKey(...args) {
+      calls.push(args);
+      return `sk-scoped-${args[0]}`;
     },
   };
-  return { store, spendCalls };
+  return { provisioner, calls };
 };
 
 const makeAuthenticator = (identity: { userId: string } | null) => {
@@ -75,8 +72,8 @@ const makeApp = (overrides: Overrides = {}) => {
       authenticate:
         overrides.authenticate ??
         makeAuthenticator({ userId: "user-1" }).authenticate,
-      creditStore: overrides.creditStore ?? makeCreditStore().store,
-      provisioner: overrides.provisioner,
+      provisioner: overrides.provisioner ?? makeProvisioner().provisioner,
+      resolveTier: async () => overrides.tier ?? "free",
     }),
   );
   return (body: unknown, headers: Record<string, string> = {}) =>
@@ -96,10 +93,9 @@ const OK_BODY = {
 };
 
 const ENV_KEYS = [
-  "SYNAPSE_API_KEY",
+  "SYNAPSE_API_URL",
+  "SYNAPSE_GATEWAY_SECRET",
   "MAX_PROMPT_CHARS",
-  "CREDIT_COGS_MARKUP",
-  "FREE_MONTHLY_CREDITS",
   "FACET_MANAGED_ALLOWLIST",
 ] as const;
 let snapshot: Record<string, string | undefined> = {};
@@ -107,7 +103,9 @@ let snapshot: Record<string, string | undefined> = {};
 beforeEach(() => {
   snapshot = {};
   for (const k of ENV_KEYS) snapshot[k] = process.env[k];
-  process.env.SYNAPSE_API_KEY = "server-key"; // enable managed
+  // enable managed (product-scoped provisioning configured)
+  process.env.SYNAPSE_API_URL = "https://api.synapse.test";
+  process.env.SYNAPSE_GATEWAY_SECRET = "gw-secret";
   process.env.FACET_MANAGED_ALLOWLIST = "";
 });
 afterEach(() => {
@@ -118,9 +116,11 @@ afterEach(() => {
 });
 
 describe("createCritiqueRoute", () => {
-  test("returns a structured verdict and meters credits", async () => {
-    const { store, spendCalls } = makeCreditStore();
-    const res = await makeApp({ creditStore: store })(OK_BODY);
+  test("returns a structured verdict using the product-scoped key", async () => {
+    const { provisioner, calls: provisionCalls } = makeProvisioner();
+    const { caller, calls } = makeCaller(VERDICT);
+    const breaker = createSpendBreaker(500);
+    const res = await makeApp({ caller, provisioner, breaker })(OK_BODY);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ok: boolean;
@@ -132,8 +132,12 @@ describe("createCritiqueRoute", () => {
     expect(body.score).toBeCloseTo(0.3);
     expect(body.issues.length).toBe(2);
     expect(body.suggestedFix).toContain("text()");
-    // costCents 1.4 * markup 2 = ceil(2.8) = 3 credits
-    expect(spendCalls).toEqual([{ userId: "user-1", credits: 3 }]);
+    expect(provisionCalls).toEqual([
+      ["user-1", undefined, { entityType: "user", entityId: "user-1" }],
+    ]);
+    expect(calls[0]!.apiKey).toBe("sk-scoped-user-1");
+    // free-tier real spend reaches the breaker backstop
+    expect(await breaker.spentTodayCents()).toBeCloseTo(1.4);
   });
 
   test("forwards the render as a multimodal image block", async () => {
@@ -160,22 +164,40 @@ describe("createCritiqueRoute", () => {
     expect(res.status).toBe(401);
   });
 
-  test("402 when the monthly credit cap is exhausted", async () => {
-    const { store } = makeCreditStore(100, 100);
-    const res = await makeApp({ creditStore: store })(OK_BODY);
+  test("a provisioning failure is a 503 with no gateway call", async () => {
+    const { caller, calls } = makeCaller(VERDICT);
+    const res = await makeApp({
+      caller,
+      provisioner: {
+        resolveKey: async () => {
+          throw new Error("synapse-api down");
+        },
+      },
+    })(OK_BODY);
+    expect(res.status).toBe(503);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a gateway 402 surfaces as the out-of-credits 402", async () => {
+    const caller = (async () => {
+      throw new SynapseRequestError("synapse request failed: status 402", 402);
+    }) as Caller;
+    const res = await makeApp({ caller })(OK_BODY);
     expect(res.status).toBe(402);
   });
 
-  test("BYOK bypasses the managed gating and is not metered", async () => {
-    const { store, spendCalls } = makeCreditStore();
+  test("BYOK bypasses the managed gating and is not recorded", async () => {
+    const { provisioner, calls: provisionCalls } = makeProvisioner();
     const { caller, calls } = makeCaller(VERDICT);
-    const res = await makeApp({ caller, creditStore: store })({
+    const breaker = createSpendBreaker(500);
+    const res = await makeApp({ caller, provisioner, breaker })({
       ...OK_BODY,
       byokKey: "sk-user",
     });
     expect(res.status).toBe(200);
     expect(calls[0]!.apiKey).toBe("sk-user");
-    expect(spendCalls).toEqual([]);
+    expect(provisionCalls).toHaveLength(0);
+    expect(await breaker.spentTodayCents()).toBe(0);
   });
 
   test("422 when the model does not return a JSON verdict", async () => {

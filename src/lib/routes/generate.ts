@@ -1,4 +1,3 @@
-import { creditsFromCostCents } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
@@ -7,45 +6,40 @@ import {
   buildRepairMessages,
   buildSystemPrompt,
 } from "lib/prompt/facetSystemPrompt";
+import {
+  classifyUpstreamFailure,
+  recordFreeSpend,
+  resolveManagedAccess,
+} from "lib/routes/managedAccess";
 
-import type { SpendBreaker } from "lib/cost/breaker";
-import type { CreditStore } from "lib/cost/creditStore";
 import type { RateLimiter } from "lib/cost/rateLimit";
+import type { ManagedDeps } from "lib/routes/managedAccess";
 import type { callSynapse } from "lib/synapse/client";
 
 /**
- * POST /generate - the only money-spending route.
+ * POST /generate - a money-spending route.
  *
- * Money-safety is defense-in-depth and each layer is independent:
- * - the server Synapse key lives only in config, never in a response or a log
- * - the managed path requires the server key and a signed-in Omni identity
- * - the global daily breaker gates the FREE allowance only, so free-tier abuse
- *   (Sybil farming) cannot exhaust the ceiling and block paying users; a paid
- *   user is bounded instead by their own revenue-backed per-user cap
- * - the managed path is hard-capped per user per UTC month with no overage
+ * Billing is the Synapse gateway's: a managed call carries a product-scoped key
+ * for the facet Aether app, so the gateway checks the user's pooled credit
+ * balance (402 before any spend when it is empty), meters the call, and debits
+ * the balance. Facet computes no credits of its own. Money-safety around that is
+ * defense-in-depth and each layer is independent (see `managedAccess.ts`):
+ * - managed generation requires a signed-in Omni identity and a provisioned
+ *   product-scoped key; there is no shared key to fall back to, so a
+ *   provisioning failure is a 503, never unbilled spend
+ * - the global daily breaker (real cents) gates the FREE tier only, so free-tier
+ *   abuse (Sybil farming) cannot exhaust the ceiling and block paying users
  * - per-request caps (prompt length, output tokens, timeout) bound each call
  * - a per-IP sliding-window limiter throttles abuse
- * - BYOK bypasses auth, the managed breaker, and the meter entirely (zero cost to us)
+ * - BYOK bypasses auth, the breaker, and provisioning entirely (the caller's
+ *   own key, zero cost to us)
  *
  * Dependencies are injected so every branch is deterministically testable
  */
 
-interface GenerateDeps {
+interface GenerateDeps extends ManagedDeps {
   callSynapse: typeof callSynapse;
-  breaker: SpendBreaker;
   rateLimiter: RateLimiter;
-  /** Resolve the signed-in Omni identity for a request, or null when absent/invalid. */
-  authenticate: (request: Request) => Promise<{ userId: string } | null>;
-  /** Per-user monthly credit meter for the managed path. */
-  creditStore: CreditStore;
-  /**
-   * Optional per-user managed-key provisioner. When present, a managed call uses
-   * a per-user Synapse key (so Synapse attributes usage per user) instead of the
-   * shared server key. The local credit ledger still enforces the hard monthly
-   * cap, so this never widens the money-loss surface; a provisioning failure
-   * falls back to the shared key rather than blocking generation
-   */
-  provisioner?: { resolveKey: (userId: string) => Promise<string> };
   /**
    * Optional events provider for fleet AI-usage telemetry. A successful
    * generation emits `facet.generation.completed` (usage metadata only, never
@@ -79,8 +73,8 @@ const MESSAGES = {
   unauthorized:
     "Sign in to use managed AI generation, or provide your own key.",
   notAllowed: "Managed AI generation is in limited preview.",
-  overCap:
-    "You have used all of your AI credits for this month. Upgrade for more, or provide your own key.",
+  outOfCredits:
+    "You are out of AI credits. Buy more credits to keep generating, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
   noCode: "Could not generate valid code. Try rephrasing your request.",
   failed: "AI generation failed. Please try again.",
@@ -136,58 +130,20 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       return { error: MESSAGES.repairLimited };
     }
 
-    // 4. managed-path gating (BYOK bypasses every managed check)
+    // 4. managed-path gating and the product-scoped key (BYOK bypasses every
+    // managed check)
     const byokKey =
       typeof input.byokKey === "string" && input.byokKey.length > 0
         ? input.byokKey
         : undefined;
-    let userId: string | undefined;
-    // A paid user (monthly cap above the free allowance) is exempt from the
-    // global free-tier breaker and is not recorded against it; tracked here so
-    // the post-call metering below stays consistent with this gate
-    let isPaid = false;
-    if (!byokKey) {
-      if (!cfg.managedEnabled) {
-        set.status = 503;
-        return { error: MESSAGES.unavailable };
-      }
-
-      // require a signed-in Omni identity before spending our key
-      const identity = await deps.authenticate(request);
-      if (!identity) {
-        set.status = 401;
-        return { error: MESSAGES.unauthorized };
-      }
-      userId = identity.userId;
-
-      // limited-preview gate: when an allowlist is configured, only listed users
-      // may spend our managed key; everyone else must use their own key (BYOK).
-      // The ids live only in env (FACET_MANAGED_ALLOWLIST), never in code
-      if (
-        cfg.managedAllowlist.length > 0 &&
-        !cfg.managedAllowlist.includes(userId)
-      ) {
-        set.status = 403;
-        return { error: MESSAGES.notAllowed };
-      }
-
-      // enforce the per-user hard monthly credit cap before any spend
-      const usage = await deps.creditStore.getMonthlyUsage(userId);
-      if (usage.usedCredits >= usage.capCredits) {
-        set.status = 402;
-        return { error: MESSAGES.overCap };
-      }
-
-      // The global daily spend breaker gates the FREE allowance only. A paid
-      // user has a cap above the free allowance and is already bounded and
-      // revenue-backed by that per-user cap, so free-tier abuse (Sybil farming)
-      // can exhaust the shared ceiling without ever blocking a paying user
-      isPaid = usage.capCredits > cfg.freeMonthlyCredits;
-      if (!isPaid && (await deps.breaker.isTripped())) {
-        set.status = 503;
-        return { error: MESSAGES.unavailable };
-      }
+    const access = byokKey
+      ? undefined
+      : await resolveManagedAccess(deps, request, logFailure);
+    if (access && !access.ok) {
+      set.status = access.status;
+      return { error: MESSAGES[access.reason] };
     }
+    const grant = access?.ok ? access : undefined;
 
     // 5. build the grounded conversation. Two mutually exclusive follow-up paths
     // extend the original user turn: a kernel-error repair (prior code + the
@@ -219,83 +175,55 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       messages = [userTurn];
     }
 
-    // 5b. resolve a per-user managed key when provisioning is enabled, so Synapse
-    // attributes usage per user. The local ledger still hard-caps below; on any
-    // provisioning failure, fall back to the shared server key (never block)
-    let managedKey: string | undefined;
-    if (!byokKey && userId && deps.provisioner) {
-      try {
-        managedKey = await deps.provisioner.resolveKey(userId);
-      } catch (err) {
-        logFailure(
-          `per-user key provisioning failed, using shared key: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`,
-        );
-      }
+    // 6. call Synapse with the BYOK key or the product-scoped managed key
+    // (never let provider detail reach the client)
+    const apiKey = byokKey ?? grant?.apiKey;
+    if (!apiKey) {
+      set.status = 503;
+      return { error: MESSAGES.unavailable };
     }
-
-    // 6. call Synapse (never let provider detail reach the client). A BYOK key
-    // wins; else the per-user managed key when provisioned; else the shared key
     let result: Awaited<ReturnType<typeof callSynapse>>;
     try {
       result = await deps.callSynapse({
         system: buildSystemPrompt(),
         messages,
         maxTokens: cfg.maxOutputTokens,
-        apiKey: byokKey ?? managedKey,
+        apiKey,
       });
     } catch (err) {
       logFailure(err instanceof Error ? err.message : "unknown upstream error");
-      set.status = 502;
-      return { error: MESSAGES.failed };
+      // BYOK failures stay generic; a managed refusal maps the gateway status
+      // (402 out of credits, 503 unavailable) onto the user's next step
+      const failure = grant
+        ? classifyUpstreamFailure(err)
+        : { status: 502, reason: "failed" as const };
+      set.status = failure.status;
+      return { error: MESSAGES[failure.reason] };
     }
 
-    // 7. extract the code
+    // 7. record free-tier spend against the breaker (real cents from the
+    // gateway when reported, else the estimate). The call already happened, so
+    // this runs even when the output carries no code
+    if (grant) {
+      await recordFreeSpend(
+        deps.breaker,
+        grant,
+        result.usage.costCents,
+        logFailure,
+      );
+    }
+
+    // 8. extract the code
     const code = extractCode(result.text);
     if (!code) {
       set.status = 422;
       return { error: MESSAGES.noCode };
     }
 
-    // 8. meter managed spend only (BYOK is billed to the caller). A credit is a
-    // retail unit, not raw cost: debit real cents times the COGS markup, so the
-    // monthly allowance carries gross margin over model spend. The spend breaker
-    // (below) still tracks REAL cents, so the absolute money-safety ceiling is
-    // unaffected by the markup
-    const credits = creditsFromCostCents(
-      result.usage.costCents,
-      cfg.creditCogsMarkup,
-    );
-    if (!byokKey && userId) {
-      // the spend already happened upstream, so a breaker or meter write failure
-      // must not fail the response or lose the user's code; log and fall through.
-      // Only free usage is recorded against the global breaker, matching the gate
-      // above, so paid spend never counts toward (or trips) the free ceiling
-      if (!isPaid) {
-        try {
-          await deps.breaker.record(result.usage.costCents);
-        } catch (err) {
-          logFailure(
-            `breaker record failed: ${
-              err instanceof Error ? err.message : "unknown error"
-            }`,
-          );
-        }
-      }
-      try {
-        await deps.creditStore.recordSpend(userId, credits);
-      } catch (err) {
-        logFailure(
-          `credit record failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`,
-        );
-      }
-    }
-
     // 9. emit an AI-usage event for fleet analytics (fire-and-forget: never
-    // blocks or fails the response). Usage metadata only, no prompt or code
+    // blocks or fails the response). Usage metadata only, no prompt or code,
+    // and no credits: the gateway owns billing
+    const userId = grant?.userId;
     void deps.events
       ?.emit({
         type: "facet.generation.completed",
@@ -306,7 +234,6 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens,
           costCents: result.usage.costCents,
-          credits,
           repaired: attempt > 0,
         },
         ...(userId ? { subject: userId } : {}),
@@ -319,11 +246,5 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         );
       });
 
-    return {
-      code,
-      usage: {
-        credits,
-        costCents: result.usage.costCents,
-      },
-    };
+    return { code };
   });

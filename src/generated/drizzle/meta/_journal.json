@@ -29,6 +29,13 @@
       "when": 1793862496239,
       "tag": "0003_workable_guardsmen",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794615023619,
+      "tag": "0004_workable_mentallo",
+      "breakpoints": true
     }
   ]
 }

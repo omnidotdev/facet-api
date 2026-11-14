@@ -44,6 +44,8 @@ export const AUTH_WEBHOOK_SECRET = env.AUTH_WEBHOOK_SECRET;
 export const BILLING_WEBHOOK_SECRET = env.BILLING_WEBHOOK_SECRET;
 /** Billing/entitlements service base URL */
 export const BILLING_BASE_URL = env.BILLING_BASE_URL;
+/** Service API key for Aether (balance and entitlement reads) */
+export const BILLING_SERVICE_API_KEY = env.BILLING_SERVICE_API_KEY;
 /** Authorization PDP API URL */
 export const AUTHZ_API_URL = env.AUTHZ_API_URL;
 /** Enable authorization checks */

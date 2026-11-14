@@ -1,11 +1,14 @@
-import { creditsFromCostCents } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
+import {
+  classifyUpstreamFailure,
+  recordFreeSpend,
+  resolveManagedAccess,
+} from "lib/routes/managedAccess";
 
-import type { SpendBreaker } from "lib/cost/breaker";
-import type { CreditStore } from "lib/cost/creditStore";
 import type { RateLimiter } from "lib/cost/rateLimit";
+import type { ManagedDeps } from "lib/routes/managedAccess";
 import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
 
 /**
@@ -14,20 +17,17 @@ import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
  * the grounding step of the render-and-critique generation loop: instead of the
  * model guessing blindly, it reacts to what its code actually produced.
  *
- * Money-safety is IDENTICAL to /generate (same injected deps, same gating), so
- * every spend is bounded the same way: signed-in Omni identity on the managed
- * path, the limited-preview allowlist, the per-user hard monthly credit cap, the
- * free-tier daily breaker, the per-IP limiter, per-request caps, and BYOK
- * bypasses all of it at zero cost to us. Keep this in lockstep with generate.ts
+ * Money-safety is IDENTICAL to /generate (the same shared managed gating in
+ * `managedAccess.ts`): a signed-in Omni identity, the limited-preview
+ * allowlist, the free-tier daily breaker, a product-scoped key billed by the
+ * gateway against the user's pooled balance (no shared-key fallback), the
+ * per-IP limiter, and per-request caps. BYOK bypasses all of it at zero cost
+ * to us. Keep this in lockstep with generate.ts
  */
 
-interface CritiqueDeps {
+interface CritiqueDeps extends ManagedDeps {
   callSynapse: typeof callSynapse;
-  breaker: SpendBreaker;
   rateLimiter: RateLimiter;
-  authenticate: (request: Request) => Promise<{ userId: string } | null>;
-  creditStore: CreditStore;
-  provisioner?: { resolveKey: (userId: string) => Promise<string> };
 }
 
 interface CritiqueImage {
@@ -57,8 +57,8 @@ const MESSAGES = {
   rateLimited: "Too many requests. Please slow down and try again.",
   unauthorized: "Sign in to use managed AI critique, or provide your own key.",
   notAllowed: "Managed AI generation is in limited preview.",
-  overCap:
-    "You have used all of your AI credits for this month. Upgrade for more, or provide your own key.",
+  outOfCredits:
+    "You are out of AI credits. Buy more credits to keep going, or provide your own key.",
   unavailable: "AI critique is temporarily unavailable.",
   failed: "AI critique failed. Please try again.",
 } as const;
@@ -152,41 +152,24 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
       return { error: MESSAGES.rateLimited };
     }
 
-    // 3. managed-path gating (BYOK bypasses every managed check) - mirrors generate
+    // 3. managed-path gating and the product-scoped key (BYOK bypasses every
+    // managed check) - mirrors generate
     const byokKey =
       typeof input.byokKey === "string" && input.byokKey.length > 0
         ? input.byokKey
         : undefined;
-    let userId: string | undefined;
-    let isPaid = false;
-    if (!byokKey) {
-      if (!cfg.managedEnabled) {
-        set.status = 503;
-        return { error: MESSAGES.unavailable };
-      }
-      const identity = await deps.authenticate(request);
-      if (!identity) {
-        set.status = 401;
-        return { error: MESSAGES.unauthorized };
-      }
-      userId = identity.userId;
-      if (
-        cfg.managedAllowlist.length > 0 &&
-        !cfg.managedAllowlist.includes(userId)
-      ) {
-        set.status = 403;
-        return { error: MESSAGES.notAllowed };
-      }
-      const usage = await deps.creditStore.getMonthlyUsage(userId);
-      if (usage.usedCredits >= usage.capCredits) {
-        set.status = 402;
-        return { error: MESSAGES.overCap };
-      }
-      isPaid = usage.capCredits > cfg.freeMonthlyCredits;
-      if (!isPaid && (await deps.breaker.isTripped())) {
-        set.status = 503;
-        return { error: MESSAGES.unavailable };
-      }
+    const access = byokKey
+      ? undefined
+      : await resolveManagedAccess(deps, request, logFailure);
+    if (access && !access.ok) {
+      set.status = access.status;
+      return { error: MESSAGES[access.reason] };
+    }
+    const grant = access?.ok ? access : undefined;
+    const apiKey = byokKey ?? grant?.apiKey;
+    if (!apiKey) {
+      set.status = 503;
+      return { error: MESSAGES.unavailable };
     }
 
     // 4. build the multimodal critique turn (text + the render)
@@ -205,67 +188,39 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
       },
     ];
 
-    // 5. resolve a per-user managed key when provisioning is enabled
-    let managedKey: string | undefined;
-    if (!byokKey && userId && deps.provisioner) {
-      try {
-        managedKey = await deps.provisioner.resolveKey(userId);
-      } catch (err) {
-        logFailure(
-          `per-user key provisioning failed, using shared key: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`,
-        );
-      }
-    }
-
-    // 6. call the (multimodal) model; never let provider detail reach the client
+    // 5. call the (multimodal) model; never let provider detail reach the client
     let result: Awaited<ReturnType<typeof callSynapse>>;
     try {
       result = await deps.callSynapse({
         system: CRITIQUE_SYSTEM,
         messages: [{ role: "user", content }],
         maxTokens: cfg.maxOutputTokens,
-        apiKey: byokKey ?? managedKey,
+        apiKey,
       });
     } catch (err) {
       logFailure(err instanceof Error ? err.message : "unknown upstream error");
-      set.status = 502;
-      return { error: MESSAGES.failed };
+      // BYOK failures stay generic; a managed refusal maps the gateway status
+      const failure = grant
+        ? classifyUpstreamFailure(err)
+        : { status: 502, reason: "failed" as const };
+      set.status = failure.status;
+      return { error: MESSAGES[failure.reason] };
+    }
+
+    // 6. record free-tier real spend against the breaker - mirrors generate
+    if (grant) {
+      await recordFreeSpend(
+        deps.breaker,
+        grant,
+        result.usage.costCents,
+        logFailure,
+      );
     }
 
     const critique = parseCritique(result.text);
     if (!critique) {
       set.status = 422;
       return { error: MESSAGES.failed };
-    }
-
-    // 7. meter managed spend only (BYOK is billed to the caller) - mirrors generate
-    const credits = creditsFromCostCents(
-      result.usage.costCents,
-      cfg.creditCogsMarkup,
-    );
-    if (!byokKey && userId) {
-      if (!isPaid) {
-        try {
-          await deps.breaker.record(result.usage.costCents);
-        } catch (err) {
-          logFailure(
-            `breaker record failed: ${
-              err instanceof Error ? err.message : "unknown error"
-            }`,
-          );
-        }
-      }
-      try {
-        await deps.creditStore.recordSpend(userId, credits);
-      } catch (err) {
-        logFailure(
-          `credit record failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`,
-        );
-      }
     }
 
     return critique;

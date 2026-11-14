@@ -81,6 +81,19 @@ describe.skipIf(!canRun)("createDrizzleSpendBreaker (Postgres)", () => {
     expect(await b.spentTodayCents(now)).toBe(100);
   });
 
+  test("fractional cents persist (rounded up to whole cents) and trip the breaker", async () => {
+    // Real model spend is fractional (e.g. 1.4 cents) but daily_spend.spent_cents
+    // is an integer column: an unrounded insert is rejected by Postgres, so the
+    // breaker silently never recorded. Whole cents, rounded up, must persist
+    const now = at("2026-11-15T12:00:00Z");
+    const b = breaker();
+    await b.record(1.4, now);
+    expect(await b.spentTodayCents(now)).toBe(2);
+    await b.record(97.01, now);
+    expect(await b.spentTodayCents(now)).toBe(100);
+    expect(await b.isTripped(now)).toBe(true);
+  });
+
   test("spend is isolated per UTC day (resets at the day boundary)", async () => {
     const b = breaker();
     await b.record(100, at("2026-11-15T23:30:00Z")); // one day
