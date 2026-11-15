@@ -1,5 +1,6 @@
 import { Elysia } from "elysia";
 
+import consentWebhook from "lib/consent/consentWebhook";
 import idpWebhook from "lib/idp/webhooks";
 import billingWebhook from "lib/providers/billing/webhooks";
 
@@ -9,6 +10,7 @@ import billingWebhook from "lib/providers/billing/webhooks";
  */
 const webhooks = new Elysia({ prefix: "/webhooks" })
   .use(billingWebhook)
-  .use(idpWebhook);
+  .use(idpWebhook)
+  .use(consentWebhook);
 
 export default webhooks;

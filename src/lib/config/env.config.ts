@@ -60,6 +60,22 @@ export const VORTEX_API_KEY = env.VORTEX_API_KEY;
 export const INTERNAL_SERVICE_KEY = env.INTERNAL_SERVICE_KEY;
 /** Organization ID for service-key authenticated requests */
 export const SERVICE_ORGANIZATION_ID = env.SERVICE_ORGANIZATION_ID;
+/**
+ * Omni platform GraphQL API (omni-api), the authoritative fleet-wide consent
+ * ledger. Facet forwards each AI-training opt-in change the user makes in Studio
+ * here, so the decision is recorded centrally and reflected everywhere (e.g. the
+ * account hub's preference center). Optional: unset (local/dev) simply skips the
+ * forward, and the local capture-gate still works
+ */
+export const OMNI_API_URL = env.OMNI_API_URL;
+/**
+ * Shared secret for verifying Vortex deliveries of `platform.consent.changed`,
+ * so a withdrawal made on another surface (e.g. the account hub) erases this
+ * user's stored samples here too. Must equal the hmacSecret on the Vortex
+ * subscription. Unset: the receiver refuses every delivery (cannot verify), and
+ * a boot warning is logged
+ */
+export const CONSENT_WEBHOOK_SECRET = env.CONSENT_WEBHOOK_SECRET;
 
 export const isDevEnv = NODE_ENV === "development",
   isProdEnv = NODE_ENV === "production",

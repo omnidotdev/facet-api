@@ -57,9 +57,20 @@ export interface SampleStore {
   /**
    * Set a user's AI-training consent, upserting their row. Turning it off also
    * deletes every sample previously stored for the user, so withdrawal is a real
-   * erasure, not just a stop on future collection
+   * erasure, not just a stop on future collection.
+   *
+   * `version` records the consent-terms version in effect when the decision was
+   * made. It defaults to this service's current terms (a decision made in Facet
+   * Studio), but a change propagated from the central ledger passes the ledger's
+   * own policy version, so capture stays fail-closed if the two ever diverge (a
+   * projected grant under a newer version than this service knows pauses capture
+   * until the service is updated to match)
    */
-  setConsent: (userId: string, consent: boolean) => Promise<void>;
+  setConsent: (
+    userId: string,
+    consent: boolean,
+    version?: string,
+  ) => Promise<void>;
   /** Read a user's current consent (false when the user has never opted in). */
   getConsent: (userId: string) => Promise<boolean>;
 }
@@ -86,7 +97,7 @@ export const createSampleStore = (db: SampleDb): SampleStore => ({
       });
   },
 
-  async setConsent(userId, consent) {
+  async setConsent(userId, consent, version = AI_TRAINING_CONSENT_VERSION) {
     // record the moment of the change and the terms in effect when the user
     // acted, for both a grant and a withdrawal (the row is the current state;
     // the event stream is the history)
@@ -97,14 +108,14 @@ export const createSampleStore = (db: SampleDb): SampleStore => ({
         identityProviderId: userId,
         aiTrainingConsent: consent,
         aiTrainingConsentAt: now,
-        aiTrainingConsentVersion: AI_TRAINING_CONSENT_VERSION,
+        aiTrainingConsentVersion: version,
       })
       .onConflictDoUpdate({
         target: userTable.identityProviderId,
         set: {
           aiTrainingConsent: consent,
           aiTrainingConsentAt: now,
-          aiTrainingConsentVersion: AI_TRAINING_CONSENT_VERSION,
+          aiTrainingConsentVersion: version,
           updatedAt: now,
         },
       });

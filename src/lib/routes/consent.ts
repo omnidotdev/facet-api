@@ -32,6 +32,13 @@ interface ConsentDeps {
    * fails the user's toggle
    */
   events?: GenerationEvents;
+  /**
+   * Forward the decision to the central consent ledger (omni-api), so it is
+   * recorded fleet-wide and reflected on other surfaces (e.g. the account hub).
+   * Best-effort: a failure is logged but never fails the user's toggle, since
+   * the local write above is already the capture-gate (and erased on withdrawal)
+   */
+  forwardConsent?: (accessToken: string, granted: boolean) => Promise<void>;
 }
 
 interface ConsentBody {
@@ -77,7 +84,27 @@ export const createConsentRoute = (deps: ConsentDeps) =>
       return { error: MESSAGES.failed };
     }
 
-    // 4. record the change in the append-only audit stream. Awaited so the
+    // 4. forward to the central ledger so the decision is recorded fleet-wide
+    // and other surfaces (e.g. the account hub) reflect it. Best-effort: the
+    // local write above already took effect (incl. erasure on withdrawal), so a
+    // failure here only risks a transient cross-surface mismatch the next change
+    // resolves, never the user's own setting
+    const accessToken = request.headers
+      .get("authorization")
+      ?.split("Bearer ")[1];
+    if (accessToken && deps.forwardConsent) {
+      try {
+        await deps.forwardConsent(accessToken, input.consent);
+      } catch (err) {
+        logFailure(
+          `central consent forward failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      }
+    }
+
+    // 5. record the change in the append-only audit stream. Awaited so the
     // record has the best chance of landing, but a sink failure never fails the
     // toggle: the user's choice is already persisted and is the live record
     try {
