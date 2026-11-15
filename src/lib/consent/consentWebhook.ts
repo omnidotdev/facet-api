@@ -122,26 +122,21 @@ const store = createSampleStore(dbPool);
  */
 const consentWebhook = new Elysia().post(
   "/consent",
-  async ({ request, headers, set }) => {
-    let rawBody: string;
-    try {
-      rawBody = await request.text();
-    } catch (err) {
-      console.error("[consent webhook] failed to read body:", err);
-      set.status = 500;
-      return "Internal Server Error";
-    }
-
-    const { status, body } = await handleConsentDelivery({
-      rawBody,
+  async ({ body, headers, set }) => {
+    // `type: "text"` keeps the body an unparsed string, so the HMAC is verified
+    // over the exact bytes Vortex signed. Reading request.text() instead throws
+    // "Body already used" once Elysia has parsed a JSON body
+    const { status, body: responseBody } = await handleConsentDelivery({
+      rawBody: typeof body === "string" ? body : "",
       signature: headers["x-vortex-signature"],
       secret: CONSENT_WEBHOOK_SECRET,
       apply: (payload) => applyConsentChange({ store, payload }),
     });
 
     set.status = status;
-    return body;
+    return responseBody;
   },
+  { parse: "text" },
 );
 
 export default consentWebhook;
