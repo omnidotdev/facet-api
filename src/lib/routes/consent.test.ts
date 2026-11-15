@@ -37,10 +37,15 @@ const makeStore = () => {
   return { store, calls };
 };
 
+type ForwardConsent = NonNullable<
+  Parameters<typeof createConsentRoute>[0]["forwardConsent"]
+>;
+
 interface Overrides {
   authenticate?: Authenticate;
   store?: Store;
   events?: Events;
+  forwardConsent?: ForwardConsent;
 }
 
 const makeApp = (overrides: Overrides = {}) => {
@@ -50,6 +55,7 @@ const makeApp = (overrides: Overrides = {}) => {
         overrides.authenticate ?? (async () => ({ userId: "user-1" })),
       store: overrides.store ?? makeStore().store,
       events: overrides.events,
+      forwardConsent: overrides.forwardConsent,
     }),
   );
   return (body: unknown, headers: Record<string, string> = {}) =>
@@ -130,6 +136,34 @@ describe("POST /consent", () => {
 
     expect(res.status).toBe(500);
     expect(emitted).toHaveLength(0);
+  });
+
+  test("forwards the decision to the central ledger with the caller's token", async () => {
+    const forwarded: { token: string; granted: boolean }[] = [];
+    const forwardConsent: ForwardConsent = async (token, granted) => {
+      forwarded.push({ token, granted });
+    };
+    const res = await makeApp({ forwardConsent })(
+      { consent: true },
+      { authorization: "Bearer tok-123" },
+    );
+
+    expect(res.status).toBe(200);
+    expect(forwarded).toEqual([{ token: "tok-123", granted: true }]);
+  });
+
+  test("a central-forward failure never fails the toggle (local write already stands)", async () => {
+    const { store, calls } = makeStore();
+    const forwardConsent: ForwardConsent = async () => {
+      throw new Error("ledger down");
+    };
+    const res = await makeApp({ store, forwardConsent })(
+      { consent: false },
+      { authorization: "Bearer tok-123" },
+    );
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ userId: "user-1", consent: false }]);
   });
 
   test("an audit-sink failure never fails the toggle (the choice is already persisted)", async () => {

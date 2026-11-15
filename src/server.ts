@@ -20,6 +20,8 @@ import appConfig from "lib/config/app.config";
 import {
   BILLING_BASE_URL,
   BILLING_SERVICE_API_KEY,
+  CONSENT_WEBHOOK_SECRET,
+  OMNI_API_URL,
   PORT,
   corsAllowedOrigins,
   isDevEnv,
@@ -31,6 +33,7 @@ import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
+import { createPlatformConsentClient } from "lib/platform/consentClient";
 import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
 import { createConsentRoute } from "lib/routes/consent";
@@ -106,6 +109,21 @@ const resolveTier = createTierResolver(billing);
 // fire-and-forget capture simply errors and is swallowed, never blocking a
 // generation
 const sampleStore = createSampleStore(dbPool);
+// Forward each in-app consent toggle to the central ledger (omni-api), the
+// authoritative fleet-wide record other surfaces read. Without OMNI_API_URL the
+// client is a no-op and the local capture-gate still works; a central-origin
+// withdrawal still reaches Facet through the /webhooks/consent receiver
+if (!OMNI_API_URL) {
+  console.warn(
+    "OMNI_API_URL not set, in-app consent changes will not be forwarded to the central ledger",
+  );
+}
+if (!CONSENT_WEBHOOK_SECRET) {
+  console.warn(
+    "CONSENT_WEBHOOK_SECRET not set, central consent-withdrawal deliveries cannot be verified (erasure on withdrawal from other surfaces disabled)",
+  );
+}
+const platformConsent = createPlatformConsentClient(OMNI_API_URL);
 const provisioner =
   aiConfig.managedEnabled &&
   aiConfig.synapseApiUrl &&
@@ -223,6 +241,8 @@ const app = new Elysia({
       authenticate: authenticateUser,
       store: sampleStore,
       events,
+      forwardConsent: (accessToken, granted) =>
+        platformConsent.setConsent(accessToken, granted),
     }),
   )
   // SVG/image import proxy: fetches user-supplied art by URL server-side (the
