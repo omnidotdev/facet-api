@@ -6,9 +6,11 @@ import {
   recordFreeSpend,
   resolveManagedAccess,
 } from "lib/routes/managedAccess";
+import { resolveGenerationId } from "lib/routes/telemetry";
 
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { ManagedDeps } from "lib/routes/managedAccess";
+import type { GenerationEvents } from "lib/routes/telemetry";
 import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
 
 /**
@@ -28,6 +30,13 @@ import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
 interface CritiqueDeps extends ManagedDeps {
   callSynapse: typeof callSynapse;
   rateLimiter: RateLimiter;
+  /**
+   * Optional events provider for fleet AI-usage telemetry. A completed critique
+   * emits `facet.generation.critiqued` with the verdict (ok, score, issue
+   * count) and usage metadata only, never the prompt or code. Fire-and-forget:
+   * a failure never affects the response
+   */
+  events?: GenerationEvents;
 }
 
 interface CritiqueImage {
@@ -41,6 +50,8 @@ interface CritiqueBody {
   code?: unknown;
   image?: CritiqueImage;
   byokKey?: unknown;
+  /** The generation id of the chain being critiqued, echoed from the draft. */
+  generationId?: unknown;
 }
 
 /** The structured verdict returned to the client. */
@@ -125,6 +136,7 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
   new Elysia().post("/critique", async ({ body, request, set }) => {
     const cfg = getAiConfig();
     const input = (body ?? {}) as CritiqueBody;
+    const generationId = resolveGenerationId(input.generationId);
 
     // 1. validate inputs
     const prompt = typeof input.prompt === "string" ? input.prompt : "";
@@ -222,6 +234,33 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
       set.status = 422;
       return { error: MESSAGES.failed };
     }
+
+    // emit the verdict for fleet analytics (fire-and-forget: never blocks or
+    // fails the response). The verdict and usage metadata only, correlated to
+    // the generation chain; no prompt, no code, no render, no credits
+    const userId = grant?.userId;
+    void deps.events
+      ?.emit({
+        type: "facet.generation.critiqued",
+        correlationId: generationId,
+        data: {
+          byok: Boolean(byokKey),
+          userId: userId ?? null,
+          model: cfg.model,
+          ok: critique.ok,
+          score: critique.score,
+          issueCount: critique.issues.length,
+          costCents: result.usage.costCents,
+        },
+        ...(userId ? { subject: userId } : {}),
+      })
+      .catch((err: unknown) => {
+        logFailure(
+          `event emit failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`,
+        );
+      });
 
     return critique;
   });
