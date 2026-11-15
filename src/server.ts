@@ -34,6 +34,7 @@ import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
 import { createCritiqueRoute } from "lib/routes/critique";
+import { createDispositionRoute } from "lib/routes/disposition";
 import { createGenerateRoute } from "lib/routes/generate";
 import { createImportRoute } from "lib/routes/import";
 import { callSynapse } from "lib/synapse/client";
@@ -189,8 +190,19 @@ const app = new Elysia({
       breaker: spendBreaker,
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
+      events,
       provisioner,
       resolveTier,
+    }),
+  )
+  // Generation disposition: the human-in-the-loop signal (kept / discarded /
+  // regenerated) the server cannot see on its own. Spends no money, stores
+  // nothing, emits one metadata-only event correlated to the generation
+  .use(
+    createDispositionRoute({
+      rateLimiter: aiRateLimiter,
+      authenticate: authenticateUser,
+      events,
     }),
   )
   // SVG/image import proxy: fetches user-supplied art by URL server-side (the

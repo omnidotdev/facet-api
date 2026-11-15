@@ -37,6 +37,7 @@ const makeEvents = () => {
     type: string;
     data: Record<string, unknown>;
     subject?: string;
+    correlationId?: string;
   }[] = [];
   const events: Events = {
     async emit(event) {
@@ -466,6 +467,42 @@ describe("POST /generate", () => {
     const serialized = JSON.stringify(event.data);
     expect(serialized).not.toContain("10mm cube");
     expect(serialized).not.toContain(CODE);
+  });
+
+  test("returns a generation id and emits it as the event correlation id", async () => {
+    const { events, emitted } = makeEvents();
+    const request = makeApp({ events });
+    const res = await request({ prompt: "a 10mm cube" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(typeof json.generationId).toBe("string");
+    expect(json.generationId.length).toBeGreaterThan(0);
+
+    await Promise.resolve();
+    expect(emitted[0]!.correlationId).toBe(json.generationId);
+  });
+
+  test("reuses a client-supplied generation id so a refine stays one chain", async () => {
+    const { events, emitted } = makeEvents();
+    const request = makeApp({ events });
+    const res = await request({
+      prompt: "scorpio symbol",
+      generationId: "gen-abc-123",
+      refine: {
+        code: "return cube(10);",
+        suggestion: "add a curved tail",
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.generationId).toBe("gen-abc-123");
+
+    await Promise.resolve();
+    expect(emitted[0]!.correlationId).toBe("gen-abc-123");
+    // a refine pass is marked as such for the funnel
+    expect(emitted[0]!.data.refined).toBe(true);
   });
 
   test("a failed generation emits no event", async () => {

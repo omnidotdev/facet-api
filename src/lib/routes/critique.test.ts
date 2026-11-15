@@ -13,6 +13,24 @@ import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
 type Caller = Parameters<typeof createCritiqueRoute>[0]["callSynapse"];
 type Authenticate = Parameters<typeof createCritiqueRoute>[0]["authenticate"];
+type Events = NonNullable<Parameters<typeof createCritiqueRoute>[0]["events"]>;
+
+/** Build an events stub that records every emitted event. */
+const makeEvents = () => {
+  const emitted: {
+    type: string;
+    data: Record<string, unknown>;
+    subject?: string;
+    correlationId?: string;
+  }[] = [];
+  const events: Events = {
+    async emit(event) {
+      emitted.push(event);
+      return undefined;
+    },
+  };
+  return { events, emitted };
+};
 
 const VERDICT = JSON.stringify({
   ok: false,
@@ -28,6 +46,7 @@ interface Overrides {
   breaker?: SpendBreaker;
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
+  events?: Events;
   provisioner?: ManagedKeyProvisioner;
   tier?: string;
 }
@@ -72,6 +91,7 @@ const makeApp = (overrides: Overrides = {}) => {
       authenticate:
         overrides.authenticate ??
         makeAuthenticator({ userId: "user-1" }).authenticate,
+      events: overrides.events,
       provisioner: overrides.provisioner ?? makeProvisioner().provisioner,
       resolveTier: async () => overrides.tier ?? "free",
     }),
@@ -205,5 +225,42 @@ describe("createCritiqueRoute", () => {
       OK_BODY,
     );
     expect(res.status).toBe(422);
+  });
+
+  test("emits facet.generation.critiqued with the verdict, correlated to the generation", async () => {
+    const { events, emitted } = makeEvents();
+    const res = await makeApp({ events })({
+      ...OK_BODY,
+      generationId: "gen-xyz-9",
+    });
+
+    expect(res.status).toBe(200);
+    // the emit is fire-and-forget, so let the microtask settle
+    await Promise.resolve();
+    expect(emitted).toHaveLength(1);
+    const event = emitted[0]!;
+    expect(event.type).toBe("facet.generation.critiqued");
+    expect(event.correlationId).toBe("gen-xyz-9");
+    expect(event.subject).toBe("user-1");
+    expect(event.data).toMatchObject({
+      byok: false,
+      userId: "user-1",
+      ok: false,
+      issueCount: 2,
+    });
+    // never leak the prompt or the code into telemetry
+    const serialized = JSON.stringify(event.data);
+    expect(serialized).not.toContain("scorpio");
+    expect(serialized).not.toContain("cube(10)");
+  });
+
+  test("a failed critique emits no event", async () => {
+    const { events, emitted } = makeEvents();
+    const res = await makeApp({ events, caller: makeCaller("no json").caller })(
+      OK_BODY,
+    );
+    expect(res.status).toBe(422);
+    await Promise.resolve();
+    expect(emitted).toHaveLength(0);
   });
 });

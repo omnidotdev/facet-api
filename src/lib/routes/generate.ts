@@ -11,9 +11,11 @@ import {
   recordFreeSpend,
   resolveManagedAccess,
 } from "lib/routes/managedAccess";
+import { resolveGenerationId } from "lib/routes/telemetry";
 
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { ManagedDeps } from "lib/routes/managedAccess";
+import type { GenerationEvents } from "lib/routes/telemetry";
 import type { callSynapse } from "lib/synapse/client";
 
 /**
@@ -46,13 +48,7 @@ interface GenerateDeps extends ManagedDeps {
    * the prompt or code). Fire-and-forget: a failure never affects the response.
    * Omitted in tests that do not assert on events
    */
-  events?: {
-    emit: (event: {
-      type: string;
-      data: Record<string, unknown>;
-      subject?: string;
-    }) => Promise<unknown>;
-  };
+  events?: GenerationEvents;
 }
 
 interface GenerateBody {
@@ -62,6 +58,12 @@ interface GenerateBody {
   /** A render-critic refine pass: prior code plus the critic's visual suggestion. */
   refine?: { code?: unknown; suggestion?: unknown };
   attempt?: unknown;
+  /**
+   * The generation id of the chain this call belongs to. The client echoes the
+   * id from the original draft on a refine or repair re-entry so the whole loop
+   * correlates in telemetry; absent on a first draft (one is minted)
+   */
+  generationId?: unknown;
 }
 
 /** Generic, user-safe messages. Technical detail is logged server-side only. */
@@ -113,6 +115,11 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
       set.status = 400;
       return { error: MESSAGES.badPrompt };
     }
+
+    // the correlation id for this generation chain: minted on a first draft,
+    // echoed by the client on a refine or repair re-entry so the whole loop
+    // (draft, critique, refine) threads together in telemetry
+    const generationId = resolveGenerationId(input.generationId);
 
     // 2. per-IP rate limit
     if (!deps.rateLimiter.allow(clientIp(request))) {
@@ -227,6 +234,7 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     void deps.events
       ?.emit({
         type: "facet.generation.completed",
+        correlationId: generationId,
         data: {
           byok: Boolean(byokKey),
           userId: userId ?? null,
@@ -235,6 +243,11 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
           outputTokens: result.usage.outputTokens,
           costCents: result.usage.costCents,
           repaired: attempt > 0,
+          refined: Boolean(
+            refine &&
+              typeof refine.code === "string" &&
+              typeof refine.suggestion === "string",
+          ),
         },
         ...(userId ? { subject: userId } : {}),
       })
@@ -246,5 +259,7 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
         );
       });
 
-    return { code };
+    // the client echoes generationId on a refine/repair re-entry and on the
+    // disposition report, so the whole loop correlates in telemetry
+    return { code, generationId };
   });
