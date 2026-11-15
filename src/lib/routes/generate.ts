@@ -15,6 +15,7 @@ import { resolveGenerationId } from "lib/routes/telemetry";
 
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { ManagedDeps } from "lib/routes/managedAccess";
+import type { SampleStore } from "lib/routes/sampleStore";
 import type { GenerationEvents } from "lib/routes/telemetry";
 import type { callSynapse } from "lib/synapse/client";
 
@@ -49,6 +50,15 @@ interface GenerateDeps extends ManagedDeps {
    * Omitted in tests that do not assert on events
    */
   events?: GenerationEvents;
+  /**
+   * Optional consented-sample store. When present, a successful managed
+   * generation persists the prompt and final code as AI training/eval data, but
+   * ONLY for a signed-in user who has opted in (the store enforces the consent
+   * gate and stores nothing otherwise). Fire-and-forget: a failure never affects
+   * the response, and a BYOK or anonymous call never reaches it. Omitted in
+   * tests and whenever the database is unavailable
+   */
+  samples?: Pick<SampleStore, "capture">;
 }
 
 interface GenerateBody {
@@ -258,6 +268,23 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
           }`,
         );
       });
+
+    // 10. consented eval capture: retain the prompt and final code as AI
+    // training data, but ONLY for a signed-in managed user who opted in (the
+    // store enforces the consent gate). Fire-and-forget and best-effort: never
+    // blocks or fails the response, and a BYOK or anonymous call (no `userId`)
+    // never reaches it
+    if (userId) {
+      void deps.samples
+        ?.capture({ generationId, userId, prompt, code, model: cfg.model })
+        .catch((err: unknown) => {
+          logFailure(
+            `sample capture failed: ${
+              err instanceof Error ? err.message : "unknown error"
+            }`,
+          );
+        });
+    }
 
     // the client echoes generationId on a refine/repair re-entry and on the
     // disposition report, so the whole loop correlates in telemetry
