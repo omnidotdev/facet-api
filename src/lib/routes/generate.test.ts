@@ -19,6 +19,9 @@ type Caller = Parameters<typeof createGenerateRoute>[0]["callSynapse"];
 type Authenticate = Parameters<typeof createGenerateRoute>[0]["authenticate"];
 
 type Events = NonNullable<Parameters<typeof createGenerateRoute>[0]["events"]>;
+type Samples = NonNullable<
+  Parameters<typeof createGenerateRoute>[0]["samples"]
+>;
 
 interface Overrides {
   caller?: Caller;
@@ -26,10 +29,28 @@ interface Overrides {
   rateLimiter?: RateLimiter;
   authenticate?: Authenticate;
   events?: Events;
+  samples?: Samples;
   /** null removes the provisioner (provisioning not configured) */
   provisioner?: ManagedKeyProvisioner | null;
   tier?: string;
 }
+
+/** A consented-sample store stub that records every capture. */
+const makeSamples = () => {
+  const captured: {
+    generationId: string;
+    userId: string;
+    prompt: string;
+    code: string;
+    model?: string;
+  }[] = [];
+  const samples: Samples = {
+    async capture(sample) {
+      captured.push(sample);
+    },
+  };
+  return { samples, captured };
+};
 
 /** Build an events stub that records every emitted event. */
 const makeEvents = () => {
@@ -113,6 +134,7 @@ const makeApp = (overrides: Overrides = {}) => {
         overrides.authenticate ??
         makeAuthenticator({ userId: "user-1" }).authenticate,
       events: overrides.events,
+      samples: overrides.samples,
       provisioner:
         overrides.provisioner === null
           ? undefined
@@ -632,5 +654,47 @@ describe("POST /generate", () => {
     expect(text).toContain("cube(10)");
     expect(text).toContain("curved tail");
     expect(text).not.toMatch(/threw|error/i);
+  });
+
+  test("captures the consented sample for a managed generation (prompt, code, user, chain id)", async () => {
+    const { samples, captured } = makeSamples();
+    const request = makeApp({ samples });
+
+    const res = await request({ prompt: "a 10mm cube" });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // the consent gate itself lives in the store; the route hands it the pair
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({
+      userId: "user-1",
+      prompt: "a 10mm cube",
+      code: CODE,
+      generationId: body.generationId,
+    });
+  });
+
+  test("never captures a BYOK generation (no signed-in user to attribute or gate on)", async () => {
+    const { samples, captured } = makeSamples();
+    const request = makeApp({ samples });
+
+    const res = await request({ prompt: "a 10mm cube", byokKey: "sk-byok" });
+
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(0);
+  });
+
+  test("a capture failure never fails the generation", async () => {
+    const samples: Samples = {
+      async capture() {
+        throw new Error("database down");
+      },
+    };
+    const request = makeApp({ samples });
+
+    const res = await request({ prompt: "a 10mm cube" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).code).toBe(CODE);
   });
 });

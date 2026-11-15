@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createCapabilitiesRoute } from "./capabilities";
 
 type Billing = Parameters<typeof createCapabilitiesRoute>[0]["billing"];
+type Store = NonNullable<
+  Parameters<typeof createCapabilitiesRoute>[0]["store"]
+>;
 
 /** An Aether stub serving a fixed retail-USD balance and recording lookups */
 const makeBilling = (balance: number | null = 1.2345) => {
@@ -16,15 +19,24 @@ const makeBilling = (balance: number | null = 1.2345) => {
   return { billing, calls };
 };
 
+/** A consent store stub serving a fixed opt-in state. */
+const makeStore = (consent: boolean): Store => ({
+  async getConsent() {
+    return consent;
+  },
+});
+
 const probe = (
   authenticate: (r: Request) => Promise<{ userId: string } | null>,
   billing: Billing = makeBilling().billing,
   tier = "free",
+  store?: Store,
 ) =>
   createCapabilitiesRoute({
     authenticate,
     billing,
     resolveTier: async () => tier,
+    store,
   }).handle(new Request("http://local/capabilities"));
 
 const signedInAs = (userId: string) => async () => ({ userId });
@@ -60,11 +72,13 @@ describe("/capabilities", () => {
     const body = await (
       await probe(signedInAs("user-1"), billing, "pro")
     ).json();
-    // $1.2345 retail is 123.45 credits, floored so the display never overstates
+    // $1.2345 retail is 123.45 credits, floored so the display never overstates.
+    // Consent defaults off when no store is wired (the probe omits one here)
     expect(body).toEqual({
       signedIn: true,
       managedGeneration: true,
       tier: "pro",
+      aiTrainingConsent: false,
       credits: { balance: 123 },
     });
     // the balance is the user's own pool (Facet bills the user personally)
@@ -107,6 +121,31 @@ describe("/capabilities", () => {
     const body = await (await probe(signedInAs("stranger"), billing)).json();
     expect(body).toEqual({ signedIn: true, managedGeneration: false });
     expect(calls).toHaveLength(0);
+  });
+
+  test("reports the user's AI-training consent from the store", async () => {
+    const body = await (
+      await probe(
+        signedInAs("user-1"),
+        makeBilling().billing,
+        "pro",
+        makeStore(true),
+      )
+    ).json();
+    expect(body.aiTrainingConsent).toBe(true);
+  });
+
+  test("a consent lookup failure defaults to off, never blocking the probe", async () => {
+    const failing: Store = {
+      async getConsent() {
+        throw new Error("db down");
+      },
+    };
+    const body = await (
+      await probe(signedInAs("user-1"), makeBilling().billing, "free", failing)
+    ).json();
+    expect(body.managedGeneration).toBe(true);
+    expect(body.aiTrainingConsent).toBe(false);
   });
 
   test("managed false when signed out", async () => {

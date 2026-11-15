@@ -5,6 +5,7 @@ import { getAiConfig } from "lib/config/ai.config";
 
 import type { BillingProvider } from "@omnidotdev/providers";
 import type { TierResolver } from "lib/billing/facetBilling";
+import type { SampleStore } from "lib/routes/sampleStore";
 
 interface CapabilitiesDeps {
   authenticate: (request: Request) => Promise<{ userId: string } | null>;
@@ -12,6 +13,12 @@ interface CapabilitiesDeps {
   billing: Pick<BillingProvider, "getCreditBalance">;
   /** Resolve the user's Facet tier from Aether (free on any failure) */
   resolveTier: TierResolver;
+  /**
+   * Read the user's AI-training-data consent, so the client can reflect the
+   * current state of the opt-in toggle. Optional and never gating: an absent
+   * store or a read failure degrades to a false (off) default
+   */
+  store?: Pick<SampleStore, "getConsent">;
 }
 
 /**
@@ -47,9 +54,9 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
       return { signedIn: identity !== null, managedGeneration };
     }
 
-    // A balance or tier lookup failure degrades to omitting it, never blocks
-    // the capability probe
-    const [tier, balance] = await Promise.all([
+    // A balance, tier, or consent lookup failure degrades to omitting it (or a
+    // false default), never blocks the capability probe
+    const [tier, balance, aiTrainingConsent] = await Promise.all([
       deps.resolveTier(identity.userId),
       deps.billing
         .getCreditBalance("user", identity.userId)
@@ -57,12 +64,14 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
           result ? creditsFromBalanceUsd(result.balance) : null,
         )
         .catch(() => null),
+      deps.store?.getConsent(identity.userId).catch(() => false) ?? false,
     ]);
 
     return {
       signedIn: true,
       managedGeneration,
       tier,
+      aiTrainingConsent,
       ...(balance !== null ? { credits: { balance } } : {}),
     };
   });

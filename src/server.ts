@@ -33,10 +33,12 @@ import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
 import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
+import { createConsentRoute } from "lib/routes/consent";
 import { createCritiqueRoute } from "lib/routes/critique";
 import { createDispositionRoute } from "lib/routes/disposition";
 import { createGenerateRoute } from "lib/routes/generate";
 import { createImportRoute } from "lib/routes/import";
+import { createSampleStore } from "lib/routes/sampleStore";
 import { callSynapse } from "lib/synapse/client";
 import { createFacetProvisioner } from "lib/synapse/provisioner";
 
@@ -97,6 +99,13 @@ if (!BILLING_BASE_URL) {
   );
 }
 const resolveTier = createTierResolver(billing);
+// Consented AI training/eval store: the only place the service persists a
+// user's prompt or code, and only ever for a signed-in user who has opted in
+// (the store enforces the consent gate and erases a user's samples when they
+// withdraw). Shares the DB pool; if the database is unavailable the
+// fire-and-forget capture simply errors and is swallowed, never blocking a
+// generation
+const sampleStore = createSampleStore(dbPool);
 const provisioner =
   aiConfig.managedEnabled &&
   aiConfig.synapseApiUrl &&
@@ -178,6 +187,7 @@ const app = new Elysia({
       rateLimiter: aiRateLimiter,
       authenticate: authenticateUser,
       events,
+      samples: sampleStore,
       provisioner,
       resolveTier,
     }),
@@ -205,6 +215,16 @@ const app = new Elysia({
       events,
     }),
   )
+  // AI training-data consent: the per-user opt-in behind the generation-sample
+  // dataset. Authenticated (unlike disposition), spends no money. Turning it off
+  // erases the user's stored samples
+  .use(
+    createConsentRoute({
+      authenticate: authenticateUser,
+      store: sampleStore,
+      events,
+    }),
+  )
   // SVG/image import proxy: fetches user-supplied art by URL server-side (the
   // browser can't, cross-origin), SSRF-guarded. Spends no AI money; bounded by
   // sign-in and the per-IP limiter
@@ -222,6 +242,7 @@ const app = new Elysia({
       authenticate: authenticateUser,
       billing,
       resolveTier,
+      store: sampleStore,
     }),
   )
   .use(webhooks)
