@@ -1,5 +1,20 @@
 # @omnidotdev/facet-api
 
+## 0.3.0
+
+### Minor Changes
+
+- [#47](https://github.com/omnidotdev/facet-api/pull/47) [`d26a0cf`](https://github.com/omnidotdev/facet-api/commit/d26a0cfdf2661d6b16c17ce6b1583eb69abc3117) Thanks [@coopbri](https://github.com/coopbri)! - Capture a correlated, metadata-only trace of each generation so the AI loop's quality is measurable: the groundwork for choosing models and tuning the loop from evidence rather than guesses.
+  - `/generate` mints a `generationId`, returns it, and emits it as the correlation id on `facet.generation.completed` (now also flagged `refined`). The client echoes the id on a refine or repair re-entry, so a whole loop threads into one chain.
+  - `/critique` now emits `facet.generation.critiqued` with the verdict (`ok`, `score`, issue count) and usage, correlated to the same generation. The critique pass was previously invisible to telemetry.
+  - New `POST /disposition` records the human-in-the-loop signal the server cannot see on its own (kept / discarded / regenerated) as `facet.generation.<disposition>`, correlated to the generation. It spends no money, stores nothing, is unauthenticated so a BYOK user's signal is not lost, and is bounded by the per-IP limiter.
+
+  Every event is metadata only: a model id, token counts, real cents, a verdict, a disposition. The prompt and generated code are never emitted, and no credits (the gateway owns billing).
+
+### Patch Changes
+
+- [#43](https://github.com/omnidotdev/facet-api/pull/43) [`67d92a4`](https://github.com/omnidotdev/facet-api/commit/67d92a4c8a4065e8d59d4602353b0047446cfb94) Thanks [@coopbri](https://github.com/coopbri)! - Record the gateway-reported real cost on the free-tier spend breaker. The shared Synapse client now reads each call's pre-margin provider cost from the gateway (`x-synapse-provider-cost-usd`), so the breaker records what a generation or critique actually cost upstream instead of a list-rate estimate; the estimate remains the fallback when the gateway reports no cost
+
 ## 0.2.0
 
 ### Minor Changes
