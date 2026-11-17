@@ -26,20 +26,37 @@ const makeStore = (consent: boolean): Store => ({
   },
 });
 
+type Authenticate = Parameters<
+  typeof createCapabilitiesRoute
+>[0]["authenticate"];
+
 const probe = (
-  authenticate: (r: Request) => Promise<{ userId: string } | null>,
+  authenticate: Authenticate,
   billing: Billing = makeBilling().billing,
   tier = "free",
   store?: Store,
+  tierCalls: string[] = [],
 ) =>
   createCapabilitiesRoute({
     authenticate,
     billing,
-    resolveTier: async () => tier,
+    resolveTier: async (workspaceId) => {
+      tierCalls.push(workspaceId);
+      return tier;
+    },
     store,
   }).handle(new Request("http://local/capabilities"));
 
-const signedInAs = (userId: string) => async () => ({ userId });
+/** A signed-in user whose personal workspace is `ws-<userId>` (slug `<userId>`) */
+const signedInAs =
+  (
+    userId: string,
+    personalWorkspace: { id: string; slug: string } | null = {
+      id: `ws-${userId}`,
+      slug: userId,
+    },
+  ): Authenticate =>
+  async () => ({ userId, personalWorkspace });
 const signedOut = async () => null;
 
 describe("/capabilities", () => {
@@ -67,10 +84,11 @@ describe("/capabilities", () => {
     }
   });
 
-  test("reports the pooled balance in whole credits and the tier for a managed user", async () => {
+  test("reports the personal workspace's pooled balance in whole credits, its tier, and its slug", async () => {
     const { billing, calls } = makeBilling(1.2345);
+    const tierCalls: string[] = [];
     const body = await (
-      await probe(signedInAs("user-1"), billing, "pro")
+      await probe(signedInAs("user-1"), billing, "pro", undefined, tierCalls)
     ).json();
     // $1.2345 retail is 123.45 credits, floored so the display never overstates.
     // Consent defaults off when no store is wired (the probe omits one here)
@@ -79,10 +97,13 @@ describe("/capabilities", () => {
       managedGeneration: true,
       tier: "pro",
       aiTrainingConsent: false,
+      workspace: { slug: "user-1" },
       credits: { balance: 123 },
     });
-    // the balance is the user's own pool (Facet bills the user personally)
-    expect(calls).toEqual([["user", "user-1"]]);
+    // balance and tier are the personal workspace's (where a plan bought in the
+    // account hub lives), never the user entity's
+    expect(calls).toEqual([["organization", "ws-user-1"]]);
+    expect(tierCalls).toEqual(["ws-user-1"]);
   });
 
   test("rounds a sub-credit balance down and an overdrawn balance toward the debt", async () => {
@@ -146,6 +167,44 @@ describe("/capabilities", () => {
     ).json();
     expect(body.managedGeneration).toBe(true);
     expect(body.aiTrainingConsent).toBe(false);
+  });
+
+  test("a token without a personal workspace asks for re-auth (no balance, no workspace)", async () => {
+    const { billing, calls } = makeBilling();
+    const tierCalls: string[] = [];
+    const body = await (
+      await probe(
+        signedInAs("user-1", null),
+        billing,
+        "pro",
+        undefined,
+        tierCalls,
+      )
+    ).json();
+    expect(body).toEqual({
+      signedIn: true,
+      managedGeneration: false,
+      reauthRequired: true,
+    });
+    expect(calls).toHaveLength(0);
+    expect(tierCalls).toHaveLength(0);
+  });
+
+  test("no re-auth hint for a user off the whitelist, even without a workspace", async () => {
+    const body = await (await probe(signedInAs("stranger", null))).json();
+    expect(body).toEqual({ signedIn: true, managedGeneration: false });
+  });
+
+  test("consent stays per user, keyed on the user id", async () => {
+    const seen: string[] = [];
+    const store: Store = {
+      async getConsent(userId) {
+        seen.push(userId);
+        return true;
+      },
+    };
+    await probe(signedInAs("user-1"), makeBilling().billing, "free", store);
+    expect(seen).toEqual(["user-1"]);
   });
 
   test("managed false when signed out", async () => {

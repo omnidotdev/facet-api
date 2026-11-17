@@ -67,8 +67,9 @@ try {
 
 // AI gateway singletons.
 // Managed AI is billed by the Synapse gateway: each managed call uses a
-// product-scoped key for the facet Aether app, billed to the user's pooled
-// credit balance (the gateway refuses with 402 before spend when it is empty).
+// product-scoped key for the facet Aether app, billed to the pooled credit
+// balance of the user's personal workspace, where the account hub puts a paid
+// plan (the gateway refuses with 402 before spend when it is empty).
 // There is no shared managed key: without provisioning configured, the managed
 // path answers 503 and BYOK keeps working. The global daily spend breaker is
 // DB-backed (durable across instances and restarts) and gates the free tier
@@ -90,8 +91,8 @@ const aiRateLimiter = createRateLimiter({
   max: aiConfig.rateLimitMax,
 });
 // The tier decides whether the free-tier breaker applies, and the balance is
-// what /capabilities reports. Both come from Aether; without it every user
-// reads as free with no known balance
+// what /capabilities reports. Both are the personal workspace's and come from
+// Aether; without it every user reads as free with no known balance
 if (!BILLING_BASE_URL) {
   console.warn(
     "BILLING_BASE_URL not set, tier and credit balance disabled (everyone is free tier)",

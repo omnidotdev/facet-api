@@ -1,17 +1,19 @@
 import { creditsFromBalanceUsd } from "@omnidotdev/providers";
 import { Elysia } from "elysia";
 
+import { getWorkspaceCreditBalance } from "lib/billing/facetBilling";
 import { getAiConfig } from "lib/config/ai.config";
 
 import type { BillingProvider } from "@omnidotdev/providers";
+import type { Authenticate } from "lib/auth/authenticateUser";
 import type { TierResolver } from "lib/billing/facetBilling";
 import type { SampleStore } from "lib/routes/sampleStore";
 
 interface CapabilitiesDeps {
-  authenticate: (request: Request) => Promise<{ userId: string } | null>;
-  /** Aether, for the user's pooled credit balance */
+  authenticate: Authenticate;
+  /** Aether, for the personal workspace's pooled credit balance */
   billing: Pick<BillingProvider, "getCreditBalance">;
-  /** Resolve the user's Facet tier from Aether (free on any failure) */
+  /** Resolve the workspace's Facet tier from Aether (free on any failure) */
   resolveTier: TierResolver;
   /**
    * Read the user's AI-training-data consent, so the client can reflect the
@@ -29,11 +31,14 @@ interface CapabilitiesDeps {
  * only to users who can actually use managed generation, instead of showing it
  * to everyone and relying on a 403 after the fact.
  *
- * For a user who can use managed generation it also returns their tier and
- * their real credit balance: ONE pooled Aether balance per billing account,
+ * For a user who can use managed generation it also returns the tier and real
+ * credit balance of their PERSONAL WORKSPACE (the billing account the account
+ * hub puts a paid plan on): ONE pooled Aether balance per billing account,
  * shared across every Omni product, converted from retail USD to whole display
  * credits with the shared helper (rounded down, never overstated). Facet keeps
- * no ledger of its own; the gateway debits this balance
+ * no ledger of its own; the gateway debits this balance. It also returns the
+ * workspace slug (`workspace.slug`) so the client can link to that workspace's
+ * plan and credits in the account hub
  */
 export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
   new Elysia().get("/capabilities", async ({ request }) => {
@@ -41,28 +46,42 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
     const identity = await deps.authenticate(request).catch(() => null);
 
     // Mirror the managed gate in the generate route: managed is available when
-    // provisioning is configured, the user is signed in, and either no
-    // allowlist is set (open) or the user is on it
-    const allowlisted =
+    // provisioning is configured, the user is signed in, either no whitelist
+    // is set (open) or the user is on it, and they have a personal workspace
+    // to bill. A token without one must re-authenticate (the managed path
+    // answers 401), so the client is told to sign in again
+    const whitelisted =
       cfg.managedAllowlist.length === 0 ||
       (identity !== null && cfg.managedAllowlist.includes(identity.userId));
 
-    const managedGeneration =
-      cfg.managedEnabled && identity !== null && allowlisted;
+    const workspace = identity?.personalWorkspace ?? null;
 
-    if (!managedGeneration || !identity) {
+    const managedGeneration =
+      cfg.managedEnabled &&
+      identity !== null &&
+      whitelisted &&
+      workspace !== null;
+
+    if (
+      cfg.managedEnabled &&
+      identity !== null &&
+      whitelisted &&
+      workspace === null
+    ) {
+      return { signedIn: true, managedGeneration: false, reauthRequired: true };
+    }
+
+    if (!managedGeneration || !identity || !workspace) {
       return { signedIn: identity !== null, managedGeneration };
     }
 
     // A balance, tier, or consent lookup failure degrades to omitting it (or a
-    // false default), never blocks the capability probe
+    // false default), never blocks the capability probe. Tier and balance are
+    // the workspace's (billing); consent is the user's own (identity)
     const [tier, balance, aiTrainingConsent] = await Promise.all([
-      deps.resolveTier(identity.userId),
-      deps.billing
-        .getCreditBalance("user", identity.userId)
-        .then((result) =>
-          result ? creditsFromBalanceUsd(result.balance) : null,
-        )
+      deps.resolveTier(workspace.id),
+      getWorkspaceCreditBalance(deps.billing, workspace.id)
+        .then((usd) => (usd !== null ? creditsFromBalanceUsd(usd) : null))
         .catch(() => null),
       deps.store?.getConsent(identity.userId).catch(() => false) ?? false,
     ]);
@@ -72,6 +91,7 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
       managedGeneration,
       tier,
       aiTrainingConsent,
+      workspace: { slug: workspace.slug },
       ...(balance !== null ? { credits: { balance } } : {}),
     };
   });

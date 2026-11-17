@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createSpendBreaker } from "@omnidotdev/providers";
-import { SynapseRequestError } from "@omnidotdev/providers/ai";
+import {
+  SynapseProvisionError,
+  SynapseRequestError,
+} from "@omnidotdev/providers/ai";
 import { Elysia } from "elysia";
 
 import { createRateLimiter } from "lib/cost/rateLimit";
@@ -81,12 +84,29 @@ const makeProvisioner = () => {
   return { provisioner, calls };
 };
 
-/** Build an authenticate stub that records how many times it ran. */
-const makeAuthenticator = (identity: { userId: string } | null) => {
+/**
+ * Build an authenticate stub that records how many times it ran. A signed-in
+ * identity defaults to a personal workspace `ws-<userId>`; pass
+ * `personalWorkspace: null` for a user without one
+ */
+const makeAuthenticator = (
+  identity: {
+    userId: string;
+    personalWorkspace?: { id: string; slug: string } | null;
+  } | null,
+) => {
   const calls: { count: number } = { count: 0 };
   const authenticate: Authenticate = async () => {
     calls.count += 1;
-    return identity;
+    return (
+      identity && {
+        userId: identity.userId,
+        personalWorkspace:
+          identity.personalWorkspace === undefined
+            ? { id: `ws-${identity.userId}`, slug: identity.userId }
+            : identity.personalWorkspace,
+      }
+    );
   };
   return { authenticate, calls };
 };
@@ -139,8 +159,8 @@ const makeApp = (overrides: Overrides = {}) => {
         overrides.provisioner === null
           ? undefined
           : (overrides.provisioner ?? makeProvisioner().provisioner),
-      resolveTier: async (userId) => {
-        tierCalls.push(userId);
+      resolveTier: async (workspaceId) => {
+        tierCalls.push(workspaceId);
         return overrides.tier ?? "free";
       },
     }),
@@ -204,7 +224,7 @@ describe("POST /generate", () => {
   });
 
   describe("product-scoped managed key", () => {
-    test("provisions a key billed to the user and calls the gateway with it", async () => {
+    test("provisions the user's key billed to their personal workspace and calls the gateway with it", async () => {
       const { provisioner, calls: provisionCalls } = makeProvisioner();
       const { caller, calls } = makeCaller(FENCED);
       const request = makeApp({ caller, provisioner });
@@ -213,13 +233,18 @@ describe("POST /generate", () => {
 
       expect(res.status).toBe(200);
       expect(provisionCalls).toEqual([
-        ["user-1", undefined, { entityType: "user", entityId: "user-1" }],
+        [
+          "user-1",
+          undefined,
+          { entityType: "organization", entityId: "ws-user-1" },
+        ],
       ]);
       expect(calls[0]!.apiKey).toBe("sk-scoped-user-1");
     });
 
-    test("the provisioning request is scoped to the facet app and the user", async () => {
+    test("the provisioning request is scoped to the facet app and the personal workspace", async () => {
       const userId = "6f1c2a8e-4b7d-4e2a-9c1f-0a1b2c3d4e5f";
+      const workspaceId = "0b6f3c1e-8f0a-4d7e-9a51-2c4d6e8f0a1b";
       const bodies: Record<string, unknown>[] = [];
       const provisioner = createFacetProvisioner({
         apiUrl: "https://api.synapse.test",
@@ -233,7 +258,10 @@ describe("POST /generate", () => {
       const request = makeApp({
         caller,
         provisioner,
-        authenticate: makeAuthenticator({ userId }).authenticate,
+        authenticate: makeAuthenticator({
+          userId,
+          personalWorkspace: { id: workspaceId, slug: "ada" },
+        }).authenticate,
       });
 
       const res = await request({ prompt: "a 10mm cube" });
@@ -244,7 +272,7 @@ describe("POST /generate", () => {
           identityProviderId: userId,
           source: "Facet",
           appId: "facet",
-          billingEntity: { entityType: "user", entityId: userId },
+          billingEntity: { entityType: "organization", entityId: workspaceId },
         },
       ]);
       expect(calls[0]!.apiKey).toBe("sk-facet-user");
@@ -278,6 +306,52 @@ describe("POST /generate", () => {
       expect(calls).toHaveLength(0);
     });
 
+    test("a token without a personal workspace is a re-auth 401, never billing the user entity", async () => {
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        provisioner,
+        authenticate: makeAuthenticator({
+          userId: "user-1",
+          personalWorkspace: null,
+        }).authenticate,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(401);
+      expect((await res.json()).error).toBe(
+        "Sign in again to keep using AI generation.",
+      );
+      expect(provisionCalls).toHaveLength(0);
+      expect(request.tierCalls).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("a provisioning 403 (plan denies API access) is a plan-related 403 with no call", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({
+        caller,
+        provisioner: {
+          resolveKey: async () => {
+            throw new SynapseProvisionError(
+              "provision-managed-key failed: 403",
+              403,
+            );
+          },
+        },
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(403);
+      const text = await res.text();
+      expect(text).toMatch(/plan/i);
+      expect(text).not.toContain("provision");
+      expect(calls).toHaveLength(0);
+    });
+
     test("managed generation is a 503 when no provisioner is wired", async () => {
       const { caller, calls } = makeCaller(FENCED);
       const request = makeApp({ caller, provisioner: null });
@@ -303,6 +377,30 @@ describe("POST /generate", () => {
       expect(calls).toHaveLength(1);
       // nothing was spent, so nothing is recorded
       expect(await breaker.spentTodayCents()).toBe(0);
+    });
+
+    test("a gateway 429 (monthly usage meter) surfaces as a usage-limit 429", async () => {
+      const breaker = createSpendBreaker(500);
+      const request = makeApp({ caller: refusingCaller(429).caller, breaker });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(429);
+      const text = await res.text();
+      expect(text).toMatch(/usage limit/i);
+      expect(text).not.toContain("synapse");
+      expect(await breaker.spentTodayCents()).toBe(0);
+    });
+
+    test("a gateway 403 (entitlement denied) surfaces as a plan-related 403", async () => {
+      const request = makeApp({ caller: refusingCaller(403).caller });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(403);
+      const text = await res.text();
+      expect(text).toMatch(/plan/i);
+      expect(text).not.toContain("synapse");
     });
 
     test("a gateway 503 surfaces as temporarily unavailable", async () => {
@@ -423,14 +521,14 @@ describe("POST /generate", () => {
       expect(await breaker.spentTodayCents()).toBe(0);
     });
 
-    test("the tier is resolved for the signed-in user", async () => {
+    test("the tier is resolved for the personal workspace, not the user", async () => {
       const request = makeApp({
         authenticate: makeAuthenticator({ userId: "user-42" }).authenticate,
       });
 
       await request({ prompt: "a cube" });
 
-      expect(request.tierCalls).toEqual(["user-42"]);
+      expect(request.tierCalls).toEqual(["ws-user-42"]);
     });
   });
 

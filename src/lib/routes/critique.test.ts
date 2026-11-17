@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createSpendBreaker } from "@omnidotdev/providers";
-import { SynapseRequestError } from "@omnidotdev/providers/ai";
+import {
+  SynapseProvisionError,
+  SynapseRequestError,
+} from "@omnidotdev/providers/ai";
 import { Elysia } from "elysia";
 
 import { createRateLimiter } from "lib/cost/rateLimit";
@@ -49,6 +52,8 @@ interface Overrides {
   events?: Events;
   provisioner?: ManagedKeyProvisioner;
   tier?: string;
+  /** Records each workspace id the tier is resolved for */
+  tierCalls?: string[];
 }
 
 const makeProvisioner = () => {
@@ -62,8 +67,24 @@ const makeProvisioner = () => {
   return { provisioner, calls };
 };
 
-const makeAuthenticator = (identity: { userId: string } | null) => {
-  const authenticate: Authenticate = async () => identity;
+/**
+ * Build an authenticate stub. A signed-in identity defaults to a personal
+ * workspace `ws-<userId>`; pass `personalWorkspace: null` for a user without one
+ */
+const makeAuthenticator = (
+  identity: {
+    userId: string;
+    personalWorkspace?: { id: string; slug: string } | null;
+  } | null,
+) => {
+  const authenticate: Authenticate = async () =>
+    identity && {
+      userId: identity.userId,
+      personalWorkspace:
+        identity.personalWorkspace === undefined
+          ? { id: `ws-${identity.userId}`, slug: identity.userId }
+          : identity.personalWorkspace,
+    };
   return { authenticate };
 };
 
@@ -93,7 +114,10 @@ const makeApp = (overrides: Overrides = {}) => {
         makeAuthenticator({ userId: "user-1" }).authenticate,
       events: overrides.events,
       provisioner: overrides.provisioner ?? makeProvisioner().provisioner,
-      resolveTier: async () => overrides.tier ?? "free",
+      resolveTier: async (workspaceId) => {
+        overrides.tierCalls?.push(workspaceId);
+        return overrides.tier ?? "free";
+      },
     }),
   );
   return (body: unknown, headers: Record<string, string> = {}) =>
@@ -152,8 +176,13 @@ describe("createCritiqueRoute", () => {
     expect(body.score).toBeCloseTo(0.3);
     expect(body.issues.length).toBe(2);
     expect(body.suggestedFix).toContain("text()");
+    // the key is the user's but bills their personal workspace
     expect(provisionCalls).toEqual([
-      ["user-1", undefined, { entityType: "user", entityId: "user-1" }],
+      [
+        "user-1",
+        undefined,
+        { entityType: "organization", entityId: "ws-user-1" },
+      ],
     ]);
     expect(calls[0]!.apiKey).toBe("sk-scoped-user-1");
     // free-tier real spend reaches the breaker backstop
@@ -204,6 +233,74 @@ describe("createCritiqueRoute", () => {
     }) as Caller;
     const res = await makeApp({ caller })(OK_BODY);
     expect(res.status).toBe(402);
+  });
+
+  test("the tier is resolved for the personal workspace, not the user", async () => {
+    const tierCalls: string[] = [];
+    await makeApp({ tierCalls })(OK_BODY);
+    expect(tierCalls).toEqual(["ws-user-1"]);
+  });
+
+  test("a token without a personal workspace is a re-auth 401 with no provisioning or call", async () => {
+    const { provisioner, calls: provisionCalls } = makeProvisioner();
+    const { caller, calls } = makeCaller(VERDICT);
+    const tierCalls: string[] = [];
+    const res = await makeApp({
+      caller,
+      provisioner,
+      tierCalls,
+      authenticate: makeAuthenticator({
+        userId: "user-1",
+        personalWorkspace: null,
+      }).authenticate,
+    })(OK_BODY);
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe(
+      "Sign in again to keep using AI generation.",
+    );
+    expect(provisionCalls).toHaveLength(0);
+    expect(tierCalls).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a gateway 429 (usage limit) surfaces as a usage-limit 429", async () => {
+    const caller = (async () => {
+      throw new SynapseRequestError("synapse request failed: status 429", 429);
+    }) as Caller;
+    const res = await makeApp({ caller })(OK_BODY);
+    expect(res.status).toBe(429);
+    const text = await res.text();
+    expect(text).toMatch(/usage limit/i);
+    expect(text).not.toContain("synapse");
+  });
+
+  test("a gateway 403 (entitlement denied) surfaces as a plan-related 403", async () => {
+    const caller = (async () => {
+      throw new SynapseRequestError("synapse request failed: status 403", 403);
+    }) as Caller;
+    const res = await makeApp({ caller })(OK_BODY);
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).toMatch(/plan/i);
+    expect(text).not.toContain("synapse");
+  });
+
+  test("a provisioning 403 (plan denies API access) is a plan-related 403", async () => {
+    const { caller, calls } = makeCaller(VERDICT);
+    const res = await makeApp({
+      caller,
+      provisioner: {
+        resolveKey: async () => {
+          throw new SynapseProvisionError(
+            "provision-managed-key failed: 403",
+            403,
+          );
+        },
+      },
+    })(OK_BODY);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toMatch(/plan/i);
+    expect(calls).toHaveLength(0);
   });
 
   test("BYOK bypasses the managed gating and is not recorded", async () => {
