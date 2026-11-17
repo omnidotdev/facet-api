@@ -11,6 +11,7 @@ import { createRateLimiter } from "lib/cost/rateLimit";
 import { createCritiqueRoute } from "./critique";
 
 import type { SpendBreaker } from "@omnidotdev/providers";
+import type { WorkspaceFunding } from "lib/billing/facetBilling";
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
@@ -54,7 +55,25 @@ interface Overrides {
   tier?: string;
   /** Records each workspace id the tier is resolved for */
   tierCalls?: string[];
+  /** The workspace's funding, or an error the funding lookup throws */
+  funding?: WorkspaceFunding | Error;
+  /** Records each workspace id funding is resolved for */
+  fundingCalls?: string[];
 }
+
+/** A free-tier workspace that has bought credits (the default managed user) */
+const FUNDED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 10,
+  isPayingCustomer: true,
+};
+
+/** A free-tier workspace that never paid */
+const NOT_FUNDED: WorkspaceFunding = {
+  billingAccountId: null,
+  paidCreditsUsd: 0,
+  isPayingCustomer: false,
+};
 
 const makeProvisioner = () => {
   const calls: unknown[][] = [];
@@ -117,6 +136,12 @@ const makeApp = (overrides: Overrides = {}) => {
       resolveTier: async (workspaceId) => {
         overrides.tierCalls?.push(workspaceId);
         return overrides.tier ?? "free";
+      },
+      resolveFunding: async (workspaceId) => {
+        overrides.fundingCalls?.push(workspaceId);
+        const funding = overrides.funding ?? FUNDED;
+        if (funding instanceof Error) throw funding;
+        return funding;
       },
     }),
   );
@@ -185,8 +210,9 @@ describe("createCritiqueRoute", () => {
       ],
     ]);
     expect(calls[0]!.apiKey).toBe("sk-scoped-user-1");
-    // free-tier real spend reaches the breaker backstop
-    expect(await breaker.spentTodayCents()).toBeCloseTo(1.4);
+    // only a paying customer is served, and their spend never counts toward
+    // the free-tier breaker backstop
+    expect(await breaker.spentTodayCents()).toBe(0);
   });
 
   test("forwards the render as a multimodal image block", async () => {
@@ -233,6 +259,74 @@ describe("createCritiqueRoute", () => {
     }) as Caller;
     const res = await makeApp({ caller })(OK_BODY);
     expect(res.status).toBe(402);
+    expect((await res.json()).code).toBe("out_of_credits");
+  });
+
+  test("a free, never-paid workspace is refused with 402 payment_required before the breaker, provisioning, or any call", async () => {
+    const { provisioner, calls: provisionCalls } = makeProvisioner();
+    const { caller, calls } = makeCaller(VERDICT);
+    const touched = { isTripped: 0, record: 0 };
+    const breaker: SpendBreaker = {
+      async isTripped() {
+        touched.isTripped += 1;
+        return false;
+      },
+      async record() {
+        touched.record += 1;
+      },
+      async spentTodayCents() {
+        return 0;
+      },
+    };
+    const res = await makeApp({
+      caller,
+      provisioner,
+      breaker,
+      funding: NOT_FUNDED,
+    })(OK_BODY);
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({
+      error:
+        "AI generation uses Omni credits. Buy credits or upgrade to Pro to start, or use your own key.",
+      code: "payment_required",
+    });
+    expect(provisionCalls).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(touched).toEqual({ isTripped: 0, record: 0 });
+  });
+
+  test("a funding lookup failure fails closed", async () => {
+    const { caller, calls } = makeCaller(VERDICT);
+    const res = await makeApp({ caller, funding: new Error("aether down") })(
+      OK_BODY,
+    );
+    expect(res.status).toBe(402);
+    expect((await res.json()).code).toBe("payment_required");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a paid tier is eligible without a funding lookup", async () => {
+    const fundingCalls: string[] = [];
+    const res = await makeApp({
+      tier: "pro",
+      funding: NOT_FUNDED,
+      fundingCalls,
+    })(OK_BODY);
+    expect(res.status).toBe(200);
+    expect(fundingCalls).toHaveLength(0);
+  });
+
+  test("a free workspace that bought credits is served even when the breaker is tripped", async () => {
+    const breaker = createSpendBreaker(100);
+    await breaker.record(100);
+    const fundingCalls: string[] = [];
+    const res = await makeApp({ breaker, funding: FUNDED, fundingCalls })(
+      OK_BODY,
+    );
+    expect(res.status).toBe(200);
+    expect(fundingCalls).toEqual(["ws-user-1"]);
+    // a paying customer's spend never counts toward the free ceiling
+    expect(await breaker.spentTodayCents()).toBe(100);
   });
 
   test("the tier is resolved for the personal workspace, not the user", async () => {

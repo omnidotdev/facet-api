@@ -12,6 +12,7 @@ import { createFacetProvisioner } from "lib/synapse/provisioner";
 import { createGenerateRoute } from "./generate";
 
 import type { SpendBreaker } from "@omnidotdev/providers";
+import type { WorkspaceFunding } from "lib/billing/facetBilling";
 import type { RateLimiter } from "lib/cost/rateLimit";
 import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
@@ -36,7 +37,41 @@ interface Overrides {
   /** null removes the provisioner (provisioning not configured) */
   provisioner?: ManagedKeyProvisioner | null;
   tier?: string;
+  /** The workspace's funding, or an error the funding lookup throws */
+  funding?: WorkspaceFunding | Error;
 }
+
+/** A free-tier workspace that has bought credits (the default managed user) */
+const FUNDED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 10,
+  isPayingCustomer: true,
+};
+
+/** A free-tier workspace that never paid (only free grants, if any) */
+const NOT_FUNDED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 0,
+  isPayingCustomer: false,
+};
+
+/** A breaker spy that counts every touch, never tripped */
+const makeBreakerSpy = () => {
+  const touched = { isTripped: 0, record: 0 };
+  const breaker: SpendBreaker = {
+    async isTripped() {
+      touched.isTripped += 1;
+      return false;
+    },
+    async record() {
+      touched.record += 1;
+    },
+    async spentTodayCents() {
+      return 0;
+    },
+  };
+  return { breaker, touched };
+};
 
 /** A consented-sample store stub that records every capture. */
 const makeSamples = () => {
@@ -142,6 +177,7 @@ const refusingCaller = (status: number) => {
 const makeApp = (overrides: Overrides = {}) => {
   const caller = overrides.caller ?? makeCaller(FENCED).caller;
   const tierCalls: string[] = [];
+  const fundingCalls: string[] = [];
   const app = new Elysia().use(
     createGenerateRoute({
       callSynapse: caller,
@@ -163,6 +199,12 @@ const makeApp = (overrides: Overrides = {}) => {
         tierCalls.push(workspaceId);
         return overrides.tier ?? "free";
       },
+      resolveFunding: async (workspaceId) => {
+        fundingCalls.push(workspaceId);
+        const funding = overrides.funding ?? FUNDED;
+        if (funding instanceof Error) throw funding;
+        return funding;
+      },
     }),
   );
 
@@ -174,7 +216,7 @@ const makeApp = (overrides: Overrides = {}) => {
         body: JSON.stringify(body),
       }),
     );
-  return Object.assign(request, { tierCalls });
+  return Object.assign(request, { tierCalls, fundingCalls });
 };
 
 const ENV_KEYS = [
@@ -374,6 +416,8 @@ describe("POST /generate", () => {
       expect(res.status).toBe(402);
       const json = await res.json();
       expect(json.error).toMatch(/out of AI credits/i);
+      // a stable code lets the client tell an empty balance from a non-payer
+      expect(json.code).toBe("out_of_credits");
       expect(calls).toHaveLength(1);
       // nothing was spent, so nothing is recorded
       expect(await breaker.spentTodayCents()).toBe(0);
@@ -467,35 +511,96 @@ describe("POST /generate", () => {
     });
   });
 
-  describe("free-tier daily breaker", () => {
-    test("records a free user's real spend (gateway or estimate) in the breaker", async () => {
-      const breaker = createSpendBreaker(500);
-      const request = makeApp({
-        caller: makeCaller(FENCED, 3).caller,
-        breaker,
-      });
+  describe("managed AI is for paying customers only", () => {
+    test("a paid tier is eligible without a funding lookup", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, tier: "pro", funding: NOT_FUNDED });
 
       const res = await request({ prompt: "a cube" });
 
       expect(res.status).toBe(200);
-      expect(await breaker.spentTodayCents()).toBe(3);
+      expect(calls).toHaveLength(1);
+      expect(request.fundingCalls).toHaveLength(0);
     });
 
-    test("a tripped breaker blocks a free user before provisioning or any call", async () => {
-      const breaker = createSpendBreaker(100);
-      await breaker.record(100);
+    test("a free workspace that bought credits is eligible", async () => {
       const { caller, calls } = makeCaller(FENCED);
-      const { provisioner, calls: provisionCalls } = makeProvisioner();
-      const request = makeApp({ caller, breaker, provisioner });
+      const request = makeApp({ caller, funding: FUNDED });
 
       const res = await request({ prompt: "a cube" });
 
-      expect(res.status).toBe(503);
-      expect(calls).toHaveLength(0);
-      expect(provisionCalls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(request.fundingCalls).toEqual(["ws-user-1"]);
     });
 
-    test("a paid tier is served even when the free-tier breaker is tripped", async () => {
+    test("a free, never-paid workspace is refused with 402 payment_required before the breaker, provisioning, or any call", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const { breaker, touched } = makeBreakerSpy();
+      const request = makeApp({
+        caller,
+        provisioner,
+        breaker,
+        funding: NOT_FUNDED,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(402);
+      expect(await res.json()).toEqual({
+        error:
+          "AI generation uses Omni credits. Buy credits or upgrade to Pro to start, or use your own key.",
+        code: "payment_required",
+      });
+      expect(provisionCalls).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+      expect(touched).toEqual({ isTripped: 0, record: 0 });
+    });
+
+    test("a funding lookup failure fails closed (402, nothing provisioned or called)", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const { provisioner, calls: provisionCalls } = makeProvisioner();
+      const request = makeApp({
+        caller,
+        provisioner,
+        funding: new Error("aether down"),
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(402);
+      expect((await res.json()).code).toBe("payment_required");
+      expect(provisionCalls).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("the tier and funding are resolved for the personal workspace, not the user", async () => {
+      const request = makeApp({
+        authenticate: makeAuthenticator({ userId: "user-42" }).authenticate,
+      });
+
+      await request({ prompt: "a cube" });
+
+      expect(request.tierCalls).toEqual(["ws-user-42"]);
+      expect(request.fundingCalls).toEqual(["ws-user-42"]);
+    });
+  });
+
+  describe("free-tier daily breaker (belt-and-braces, never blocks a payer)", () => {
+    test("a free-tier paying customer is served even when the breaker is tripped", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100);
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, breaker, funding: FUNDED });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    test("a paid tier is served even when the breaker is tripped", async () => {
       const breaker = createSpendBreaker(100);
       await breaker.record(100);
       const { caller, calls } = makeCaller(FENCED);
@@ -507,33 +612,23 @@ describe("POST /generate", () => {
       expect(calls).toHaveLength(1);
     });
 
-    test("paid spend is never recorded against the free breaker", async () => {
-      const breaker = createSpendBreaker(500);
+    test("a paying customer's spend is never recorded against the breaker", async () => {
+      const { breaker, touched } = makeBreakerSpy();
       const request = makeApp({
         caller: makeCaller(FENCED, 5).caller,
         breaker,
-        tier: "pro",
+        funding: FUNDED,
       });
 
       const res = await request({ prompt: "a cube" });
 
       expect(res.status).toBe(200);
-      expect(await breaker.spentTodayCents()).toBe(0);
-    });
-
-    test("the tier is resolved for the personal workspace, not the user", async () => {
-      const request = makeApp({
-        authenticate: makeAuthenticator({ userId: "user-42" }).authenticate,
-      });
-
-      await request({ prompt: "a cube" });
-
-      expect(request.tierCalls).toEqual(["ws-user-42"]);
+      expect(touched).toEqual({ isTripped: 0, record: 0 });
     });
   });
 
   describe("BYOK (unchanged: the caller's own key, no managed gating)", () => {
-    test("forwards the caller's key and skips auth, tier, breaker and provisioning", async () => {
+    test("forwards the caller's key and skips auth, tier, funding, breaker and provisioning", async () => {
       delete process.env.SYNAPSE_GATEWAY_SECRET; // managed path disabled
       process.env.FACET_MANAGED_ALLOWLIST = "owner-123";
       const breaker = createSpendBreaker(100);
@@ -550,6 +645,8 @@ describe("POST /generate", () => {
       expect(authCalls.count).toBe(0);
       expect(provisionCalls).toHaveLength(0);
       expect(request.tierCalls).toHaveLength(0);
+      // a free, never-paid user can still use their own key
+      expect(request.fundingCalls).toHaveLength(0);
       // BYOK spend is not recorded against our breaker
       expect(await breaker.spentTodayCents()).toBe(100);
     });
