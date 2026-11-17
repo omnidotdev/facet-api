@@ -136,6 +136,17 @@ interface AiConfig {
    * git, so no personal identifier is ever committed
    */
   managedAllowlist: string[];
+  /**
+   * Most background generation jobs one user may have queued or running at
+   * once; another enqueue is refused with `too_many_jobs`
+   */
+  maxActiveJobsPerUser: number;
+  /**
+   * Most background generation jobs one instance runs at once. Each job is one
+   * outbound Synapse call, so this bounds concurrent spend and connections
+   * per replica; further jobs wait in the queue
+   */
+  jobWorkerConcurrency: number;
 }
 
 /**
@@ -172,5 +183,7 @@ export const getAiConfig = (): AiConfig => {
       .split(",")
       .map((id) => id.trim())
       .filter((id) => id.length > 0),
+    maxActiveJobsPerUser: toInt(env.MAX_ACTIVE_GENERATION_JOBS, 3),
+    jobWorkerConcurrency: toInt(env.GENERATION_WORKER_CONCURRENCY, 4),
   };
 };

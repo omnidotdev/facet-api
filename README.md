@@ -11,6 +11,10 @@ Billing is the Synapse gateway's job, not this service's. A managed call carries
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/generate` | Turn a prompt into Facet TypeScript. Managed (product-scoped key, billed to the personal workspace's credits) or BYOK (caller's key). |
+| `POST` | `/generations` | Queue a managed generation as a background job (same gates as `/generate`), `202 { job }`. Managed only. |
+| `GET` | `/generations` | The caller's own recent jobs (up to 20), newest first. |
+| `GET` | `/generations/:id` | One of the caller's jobs (`404` otherwise). |
+| `DELETE` | `/generations/:id` | Dismiss one of the caller's jobs, deleting its prompt and result (`204`). |
 | `POST` | `/critique` | Score a render of a generated part against the request (vision). Same gating as `/generate`. |
 | `GET` | `/capabilities` | Whether the caller may use managed generation, plus their personal workspace's tier, pooled credit balance, and slug (`workspace.slug`, for account-hub links). A signed-in user whose workspace has no paid tier and never bought credits gets `managedGeneration: false` with `paymentRequired: true` (plus `tier`, `workspace`, and `credits` when known) so the app can offer buy credits, upgrade, or BYOK. |
 | `GET` | `/health` | Liveness. |
@@ -44,6 +48,15 @@ Response:
 - No credit figure is returned: the gateway debits the balance, and the app shows the refreshed balance from `GET /capabilities`.
 - The `previous` field drives the client-side repair loop: on a kernel throw the app re-calls `/generate` with the failing code plus the error so the model can fix it.
 
+### Background generation (`/generations`)
+
+A managed generation takes a minute or two, so the app queues it as a job instead of holding a request open: it keeps running, and its result waits, if the user closes the panel or leaves the page.
+
+- `POST /generations` takes the same body as `/generate` without `byokKey` (a caller's own key is never stored, so BYOK is refused with `400` `bad_input` and stays on `/generate`). It runs every `/generate` gate first, in the same order and with the same status codes and `code`s (`bad_prompt`, `rate_limited`, `repair_limited`, `unauthorized`, `reauth_required`, `not_allowed`, `payment_required`, `plan_required`, `unavailable`), then refuses a user who already has `MAX_ACTIVE_GENERATION_JOBS` queued or running with `429` `too_many_jobs`. On acceptance it answers `202 { job }`.
+- A job is `{ id, kind, status, prompt, generationId, code?, error?, createdAt, startedAt, finishedAt, expiresAt }`: `kind` is `draft`, `repair`, or `refine`; `status` is `queued`, `running`, `succeeded` (with `code`), or `failed` (with `error: { code, message, status }`, the same code, user-safe message, and HTTP status `/generate` would have answered, e.g. `out_of_credits`, `no_code`, `truncated`, or `interrupted`).
+- An in-process worker runs queued jobs, at most `GENERATION_WORKER_CONCURRENCY` per instance, doing exactly what `/generate` does (the shared `generationCore.ts`). Claims use `FOR UPDATE SKIP LOCKED`, so replicas never run the same job. The managed key is provisioned again when the job runs, never stored. A job is never retried automatically, since its Synapse call may already have been billed: a running job whose process stops (a crash or a redeploy) is failed with `code: "interrupted"` ("Generation was interrupted. Try again."), at once on a graceful shutdown, or within about two minutes when its heartbeat goes stale.
+- Retention: a job's row, including its prompt and result code, is deleted when the user dismisses it or 24 hours after it was queued, whichever comes first (`expires_at`; expired jobs are hidden immediately and deleted by the worker's sweep about once a minute). Jobs are not the AI-training dataset; that stays the opt-in `generation_sample` table.
+
 ## Money-safety model
 
 Defense-in-depth. Each layer is independent, so a bug in one does not defeat the others:
@@ -54,7 +67,7 @@ Defense-in-depth. Each layer is independent, so a bug in one does not defeat the
 4. **Non-paying daily spend breaker (belt-and-braces).** Non-paying managed spend is tracked per UTC day in real cents (whole cents, rounded up) in the `daily_spend` table and returns `503` once `DAILY_SPEND_CEILING_CENTS` is hit. Non-payers are already refused by layer 3, so the breaker never blocks or counts a paying customer and only engages if eligibility is ever widened. Spend is the gateway's reported cost when present, else an estimate from list prices; the estimate feeds only this backstop, never billing.
 5. **Auth-gated managed path.** The managed path requires a valid signed-in Omni identity (bearer token verified via Gatekeeper); no anonymous access to paid inference, `401` otherwise.
 6. **Per-request caps.** `MAX_PROMPT_CHARS`, `MAX_OUTPUT_TOKENS`, a request timeout, and `MAX_REPAIR_ATTEMPTS`, all enforced server-side.
-7. **Per-IP rate limit.** Sliding-window limiter on `/generate`; `429` on exceed.
+7. **Per-IP rate limit.** Sliding-window limiter on `/generate` and `POST /generations`; `429` on exceed. A user may also have at most `MAX_ACTIVE_GENERATION_JOBS` background jobs queued or running at once.
 8. **BYOK escape hatch.** A caller may send their own key per-request over TLS. It is never persisted, bills to them, and bypasses auth, the payment gate, the breaker, and provisioning entirely.
 
 > A guard test (`src/__tests__/unit/billingGuard.test.ts`) fails the build if a local credit ledger, a cost-to-credit conversion, or a billing rate table reappears. The per-IP rate limiter stays in-memory (see the `TODO` in `rateLimit.ts`).
@@ -77,6 +90,8 @@ The service boots with nothing set. Every variable is optional; the managed path
 | `DAILY_SPEND_CEILING_CENTS` | `500` | Non-paying managed spend breaker, real cents per UTC day. Must be a positive integer: `0` or an invalid value falls back to `500` (it cannot disable the breaker); `1` trips on the first cent. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP rate-limit window. |
 | `RATE_LIMIT_MAX` | `20` | Max requests per IP per window. |
+| `MAX_ACTIVE_GENERATION_JOBS` | `3` | Most background generation jobs one user may have queued or running at once. |
+| `GENERATION_WORKER_CONCURRENCY` | `4` | Most background generation jobs one instance runs at once. |
 | `AUTH_BASE_URL` | `https://localhost:8000` | Gatekeeper base URL used to verify the managed path's bearer token. |
 | `DATABASE_URL` | _(unset)_ | Postgres connection for the daily spend breaker. The managed path needs it; BYOK does not. |
 | `BILLING_BASE_URL` | _(unset)_ | Aether base URL, for the personal workspace's tier, funding (whether it bought credits), and pooled credit balance. Unset: everyone reads as a free non-payer, managed AI is refused, and no balance is shown. |
