@@ -38,7 +38,7 @@ describe("getAiConfig", () => {
     expect(cfg.model).toBe("auto");
     expect(cfg.fallbackModel).toBe("anthropic/claude-sonnet-4-5-20250929");
     expect(cfg.maxPromptChars).toBe(2000);
-    expect(cfg.maxOutputTokens).toBe(2048);
+    expect(cfg.maxOutputTokens).toBe(8192);
     expect(cfg.dailySpendCeilingCents).toBe(500);
     expect(cfg.maxRepairAttempts).toBe(2);
     expect(cfg.rateLimitWindowMs).toBe(60_000);
@@ -81,7 +81,7 @@ describe("getAiConfig", () => {
     process.env.MAX_OUTPUT_TOKENS = "not-a-number";
     const cfg = getAiConfig();
     expect(cfg.maxPromptChars).toBe(2000);
-    expect(cfg.maxOutputTokens).toBe(2048);
+    expect(cfg.maxOutputTokens).toBe(8192);
   });
 
   test("resolves the breaker estimate rate for the active model with a conservative fallback", () => {

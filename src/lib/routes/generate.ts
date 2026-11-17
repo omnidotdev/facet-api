@@ -103,6 +103,8 @@ const MESSAGES = {
     "You are out of AI credits. Buy more credits to keep generating, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
   noCode: "Could not generate valid code. Try rephrasing your request.",
+  truncated:
+    "That part was too complex to finish in one go. Try describing a simpler version, then add detail.",
   failed: "AI generation failed. Please try again.",
 } as const satisfies Partial<Record<ErrorReason, string>>;
 
@@ -258,8 +260,17 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     // 8. extract the code
     const code = extractCode(result.text);
     if (!code) {
+      // the model's hidden thinking counts toward the output ceiling, so a
+      // response that used the whole budget was cut off before its code
+      // finished, which is a different fix than a model that declined
+      const truncated = result.usage.outputTokens >= cfg.maxOutputTokens;
+      logFailure(
+        truncated
+          ? `output truncated at the ${cfg.maxOutputTokens}-token ceiling`
+          : "model returned no fenced code block",
+      );
       set.status = 422;
-      return errorBody("noCode");
+      return errorBody(truncated ? "truncated" : "noCode");
     }
 
     // 9. emit an AI-usage event for fleet analytics (fire-and-forget: never

@@ -18,6 +18,7 @@ export const ERROR_CODES = {
   outOfCredits: "out_of_credits",
   unavailable: "unavailable",
   noCode: "no_code",
+  truncated: "truncated",
   failed: "failed",
 } as const;
 
