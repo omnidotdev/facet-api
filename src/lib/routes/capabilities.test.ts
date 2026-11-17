@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createCapabilitiesRoute } from "./capabilities";
 
+import type { WorkspaceFunding } from "lib/billing/facetBilling";
+
 type Billing = Parameters<typeof createCapabilitiesRoute>[0]["billing"];
 type Store = NonNullable<
   Parameters<typeof createCapabilitiesRoute>[0]["store"]
@@ -30,12 +32,28 @@ type Authenticate = Parameters<
   typeof createCapabilitiesRoute
 >[0]["authenticate"];
 
+/** A free-tier workspace that has bought credits (the default probed user) */
+const FUNDED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 10,
+  isPayingCustomer: true,
+};
+
+/** A free-tier workspace that never paid */
+const NOT_FUNDED: WorkspaceFunding = {
+  billingAccountId: null,
+  paidCreditsUsd: 0,
+  isPayingCustomer: false,
+};
+
 const probe = (
   authenticate: Authenticate,
   billing: Billing = makeBilling().billing,
   tier = "free",
   store?: Store,
   tierCalls: string[] = [],
+  funding: WorkspaceFunding | Error = FUNDED,
+  fundingCalls: string[] = [],
 ) =>
   createCapabilitiesRoute({
     authenticate,
@@ -43,6 +61,11 @@ const probe = (
     resolveTier: async (workspaceId) => {
       tierCalls.push(workspaceId);
       return tier;
+    },
+    resolveFunding: async (workspaceId) => {
+      fundingCalls.push(workspaceId);
+      if (funding instanceof Error) throw funding;
+      return funding;
     },
     store,
   }).handle(new Request("http://local/capabilities"));
@@ -223,5 +246,128 @@ describe("/capabilities", () => {
     delete process.env.SYNAPSE_GATEWAY_SECRET;
     const body = await (await probe(signedInAs("user-1"))).json();
     expect(body.managedGeneration).toBe(false);
+  });
+  describe("paying customers only", () => {
+    test("a paid tier is eligible without a funding lookup", async () => {
+      const fundingCalls: string[] = [];
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling().billing,
+          "pro",
+          undefined,
+          [],
+          NOT_FUNDED,
+          fundingCalls,
+        )
+      ).json();
+      expect(body.managedGeneration).toBe(true);
+      expect(body.paymentRequired).toBeUndefined();
+      expect(fundingCalls).toHaveLength(0);
+    });
+
+    test("a free workspace that bought credits is eligible", async () => {
+      const fundingCalls: string[] = [];
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling(0.5).billing,
+          "free",
+          undefined,
+          [],
+          FUNDED,
+          fundingCalls,
+        )
+      ).json();
+      expect(body).toEqual({
+        signedIn: true,
+        managedGeneration: true,
+        tier: "free",
+        aiTrainingConsent: false,
+        workspace: { slug: "user-1" },
+        credits: { balance: 50 },
+      });
+      expect(fundingCalls).toEqual(["ws-user-1"]);
+    });
+
+    test("a free, never-paid workspace is told payment is required, with its tier, slug, and balance", async () => {
+      // a free grant may leave a balance, but it never unlocks managed AI
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling(0.25).billing,
+          "free",
+          makeStore(true),
+          [],
+          NOT_FUNDED,
+        )
+      ).json();
+      expect(body).toEqual({
+        signedIn: true,
+        managedGeneration: false,
+        paymentRequired: true,
+        tier: "free",
+        workspace: { slug: "user-1" },
+        credits: { balance: 25 },
+      });
+    });
+
+    test("a never-paid workspace with an unknown balance omits credits", async () => {
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling(null).billing,
+          "free",
+          undefined,
+          [],
+          NOT_FUNDED,
+        )
+      ).json();
+      expect(body).toEqual({
+        signedIn: true,
+        managedGeneration: false,
+        paymentRequired: true,
+        tier: "free",
+        workspace: { slug: "user-1" },
+      });
+    });
+
+    test("a funding lookup failure fails closed (payment required)", async () => {
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling().billing,
+          "free",
+          undefined,
+          [],
+          new Error("aether down"),
+        )
+      ).json();
+      expect(body.managedGeneration).toBe(false);
+      expect(body.paymentRequired).toBe(true);
+    });
+
+    test("no funding lookup for a user off the whitelist or without a workspace", async () => {
+      const fundingCalls: string[] = [];
+      await probe(
+        signedInAs("stranger"),
+        makeBilling().billing,
+        "free",
+        undefined,
+        [],
+        FUNDED,
+        fundingCalls,
+      );
+      await probe(
+        signedInAs("user-1", null),
+        makeBilling().billing,
+        "free",
+        undefined,
+        [],
+        FUNDED,
+        fundingCalls,
+      );
+      expect(fundingCalls).toHaveLength(0);
+    });
   });
 });

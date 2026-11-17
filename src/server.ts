@@ -14,7 +14,10 @@ import { useGrafast } from "grafast/envelop";
 import webhooks from "webhooks";
 
 import { authenticateUser } from "lib/auth/authenticateUser";
-import { createTierResolver } from "lib/billing/facetBilling";
+import {
+  createFundingResolver,
+  createTierResolver,
+} from "lib/billing/facetBilling";
 import { getAiConfig } from "lib/config/ai.config";
 import appConfig from "lib/config/app.config";
 import {
@@ -71,9 +74,10 @@ try {
 // balance of the user's personal workspace, where the account hub puts a paid
 // plan (the gateway refuses with 402 before spend when it is empty).
 // There is no shared managed key: without provisioning configured, the managed
-// path answers 503 and BYOK keeps working. The global daily spend breaker is
-// DB-backed (durable across instances and restarts) and gates the free tier
-// only. The per-IP rate limiter stays in-memory: a sliding window across
+// path answers 503 and BYOK keeps working. Managed AI is for paying customers
+// only (402 otherwise). The global daily spend breaker is DB-backed (durable
+// across instances and restarts) and is belt-and-braces for non-paying calls
+// only, so it never blocks a payer. The per-IP rate limiter stays in-memory: a sliding window across
 // instances needs a shared store, and the gateway's credit check plus the
 // durable breaker already bound worst-case loss (see the TODO in rateLimit.ts)
 const aiConfig = getAiConfig();
@@ -90,19 +94,27 @@ const aiRateLimiter = createRateLimiter({
   windowMs: aiConfig.rateLimitWindowMs,
   max: aiConfig.rateLimitMax,
 });
-// The tier decides whether the free-tier breaker applies, and the balance is
-// what /capabilities reports. Both are the personal workspace's and come from
-// Aether; without it every user reads as free with no known balance
+// Managed AI is for paying customers only: a paid tier, or a workspace that
+// bought credits (its funding). Tier, funding, and the balance /capabilities
+// reports are all the personal workspace's and come from Aether; without it
+// every user reads as a free non-payer, so managed AI is refused (BYOK works)
 if (!BILLING_BASE_URL) {
   console.warn(
-    "BILLING_BASE_URL not set, tier and credit balance disabled (everyone is free tier)",
+    "BILLING_BASE_URL not set, tier, funding, and credit balance disabled (managed AI refused for everyone)",
   );
 } else if (!BILLING_SERVICE_API_KEY) {
   console.warn(
-    "BILLING_SERVICE_API_KEY not set, Aether credit balance reads will be refused",
+    "BILLING_SERVICE_API_KEY not set, Aether credit balance and funding reads will be refused (only paid tiers get managed AI)",
   );
 }
 const resolveTier = createTierResolver(billing);
+// The shared billing provider has no funding read, so this is a small typed
+// fetch against the same Aether base URL and service key. Fails closed
+const resolveFunding = createFundingResolver({
+  baseUrl: BILLING_BASE_URL,
+  serviceApiKey: BILLING_SERVICE_API_KEY,
+  onError: (reason) => console.error(`[billing] ${reason}`),
+});
 // Consented AI training/eval store: the only place the service persists a
 // user's prompt or code, and only ever for a signed-in user who has opted in
 // (the store enforces the consent gate and erases a user's samples when they
@@ -209,6 +221,7 @@ const app = new Elysia({
       samples: sampleStore,
       provisioner,
       resolveTier,
+      resolveFunding,
     }),
   )
   // AI vision critique (a money-spending route; same gating as /generate). Grounds
@@ -222,6 +235,7 @@ const app = new Elysia({
       events,
       provisioner,
       resolveTier,
+      resolveFunding,
     }),
   )
   // Generation disposition: the human-in-the-loop signal (kept / discarded /
@@ -256,13 +270,15 @@ const app = new Elysia({
     }),
   )
   // Client capability probe: lets the Studio show the AI panel only to users
-  // who may actually use managed generation (env allowlist), never hardcoded,
-  // with their tier and pooled credit balance
+  // who may actually use managed generation (env allowlist and a paying
+  // customer), never hardcoded, with their tier and pooled credit balance, or
+  // `paymentRequired` so the app can offer buy credits, upgrade, or BYOK
   .use(
     createCapabilitiesRoute({
       authenticate: authenticateUser,
       billing,
       resolveTier,
+      resolveFunding,
       store: sampleStore,
     }),
   )

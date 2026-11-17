@@ -3,12 +3,15 @@ import {
   SynapseRequestError,
 } from "@omnidotdev/providers/ai";
 
-import { isPaidTier, workspaceBillingEntity } from "lib/billing/facetBilling";
+import {
+  resolveManagedEligibility,
+  workspaceBillingEntity,
+} from "lib/billing/facetBilling";
 import { getAiConfig } from "lib/config/ai.config";
 
 import type { SpendBreaker } from "@omnidotdev/providers";
 import type { Authenticate } from "lib/auth/authenticateUser";
-import type { TierResolver } from "lib/billing/facetBilling";
+import type { FundingResolver, TierResolver } from "lib/billing/facetBilling";
 import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
 
 /**
@@ -26,8 +29,16 @@ import type { ManagedKeyProvisioner } from "lib/synapse/provisioner";
  * - a personal workspace to bill; a token without one (e.g. issued before
  *   Facet requested the `organization` scope) is a re-auth (401), never a
  *   fallback to billing the user entity (that would split the plan)
- * - the free-tier daily spend breaker, which gates free workspaces only (a paid
- *   tier is bounded by its own balance), so free-tier abuse cannot block payers
+ * - a PAYING CUSTOMER: a paid Facet tier, or a workspace that has bought Omni
+ *   credits. Free accounts cost nothing to create and the pooled wallet carries
+ *   free monthly grants, so a free, never-paid workspace is refused (402
+ *   `paymentRequired`) before any key is provisioned or the breaker is touched;
+ *   it can still use its own key (BYOK). Funding is read only for a free tier
+ *   and fails closed (any doubt is not a paying customer)
+ * - the free-tier daily spend breaker, belt-and-braces: it applies only to a
+ *   non-paying grant, which the eligibility gate already refuses, so it can
+ *   never block a payer (a free-tier buyer included) and only engages if
+ *   eligibility is ever widened (e.g. a free trial)
  * - a product-scoped key provisioned for the user and billed to the workspace;
  *   a provisioning failure makes managed AI unavailable (503), never an
  *   unbilled call on a shared key
@@ -45,6 +56,11 @@ export interface ManagedDeps {
   provisioner?: ManagedKeyProvisioner;
   /** Resolve the workspace's Facet tier from Aether (free on any failure) */
   resolveTier: TierResolver;
+  /**
+   * Resolve whether the workspace has bought Omni credits (not funded on any
+   * failure). Read only for a free tier
+   */
+  resolveFunding: FundingResolver;
 }
 
 /** Why the managed path was refused before any call */
@@ -52,27 +68,38 @@ type ManagedDenial =
   | "unauthorized"
   | "reauth"
   | "notAllowed"
+  | "paymentRequired"
   | "planRequired"
   | "unavailable";
 
 /**
  * A granted managed call: who made it (identity), which workspace pays, the
- * scoped key, and whether the breaker applies
+ * scoped key, and whether it is a paying customer (only a non-paying grant is
+ * subject to the free-tier breaker)
  */
 interface ManagedGrant {
   ok: true;
   userId: string;
   workspaceId: string;
   apiKey: string;
-  isPaid: boolean;
+  isPayingCustomer: boolean;
 }
 
 type ManagedAccess =
   | ManagedGrant
-  | { ok: false; status: 401 | 403 | 503; reason: ManagedDenial };
+  | { ok: false; status: 401 | 402 | 403 | 503; reason: ManagedDenial };
 
 const errorText = (err: unknown) =>
   err instanceof Error ? err.message : "unknown error";
+
+/**
+ * Whether the free-tier daily breaker applies to a call: only to a non-paying
+ * one. A paying customer (paid tier or bought credits) is bounded by their own
+ * balance at the gateway and is never blocked by, or counted toward, the free
+ * ceiling. Kept as one predicate so the gate and the recording stay in lockstep
+ */
+const appliesFreeBreaker = (isPayingCustomer: boolean): boolean =>
+  !isPayingCustomer;
 
 /**
  * Gate a managed (non-BYOK) request and resolve its product-scoped key. Never
@@ -112,10 +139,23 @@ export const resolveManagedAccess = async (
   }
   const workspaceId = personalWorkspace.id;
 
-  // the global daily breaker gates the FREE tier only, so free-tier abuse
-  // (Sybil farming) can exhaust the ceiling without ever blocking a payer
-  const isPaid = isPaidTier(await deps.resolveTier(workspaceId));
-  if (!isPaid && (await deps.breaker.isTripped())) {
+  // managed AI is for paying customers only (a paid tier, or a workspace that
+  // bought credits): free grants on farmed accounts must never reach the
+  // managed budget. Refuse before the breaker or any key is provisioned
+  const { isPayingCustomer } = await resolveManagedEligibility(
+    deps,
+    workspaceId,
+  );
+  if (!isPayingCustomer) {
+    return { ok: false, status: 402, reason: "paymentRequired" };
+  }
+
+  // belt-and-braces: the global daily breaker applies only to a non-paying
+  // grant, which the gate above refuses today, so it never blocks a payer
+  if (
+    appliesFreeBreaker(isPayingCustomer) &&
+    (await deps.breaker.isTripped())
+  ) {
     return { ok: false, status: 503, reason: "unavailable" };
   }
 
@@ -128,7 +168,7 @@ export const resolveManagedAccess = async (
       undefined,
       workspaceBillingEntity(workspaceId),
     );
-    return { ok: true, userId, workspaceId, apiKey, isPaid };
+    return { ok: true, userId, workspaceId, apiKey, isPayingCustomer };
   } catch (err) {
     logFailure(`managed key provisioning failed: ${errorText(err)}`);
     // Synapse refuses provisioning with 403 when the workspace's plan does not
@@ -150,7 +190,8 @@ type UpstreamFailure =
 
 /**
  * Map a failed managed gateway call from the gateway's HTTP status onto the
- * user's next step: 402 is an empty balance (buy credits), 403 is an
+ * user's next step: 402 is an empty balance (a paying customer who must top up,
+ * distinct from the `paymentRequired` refusal of a non-payer), 403 is an
  * entitlement the plan does not grant (upgrade), 429 is a usage limit reached
  * (wait or upgrade), 503 is temporarily unavailable, and anything else is a
  * generic failure
@@ -165,9 +206,10 @@ export const classifyUpstreamFailure = (err: unknown): UpstreamFailure => {
 };
 
 /**
- * Record a managed call's real spend against the free-tier breaker. Paid spend
- * is never recorded (it never counts toward, or trips, the free ceiling). The
- * spend already happened upstream, so a write failure is logged, never raised
+ * Record a managed call's real spend against the free-tier breaker. A paying
+ * customer's spend is never recorded (it never counts toward, or trips, the
+ * free ceiling). The spend already happened upstream, so a write failure is
+ * logged, never raised
  */
 export const recordFreeSpend = async (
   breaker: SpendBreaker,
@@ -175,7 +217,7 @@ export const recordFreeSpend = async (
   costCents: number,
   logFailure: (reason: string) => void,
 ): Promise<void> => {
-  if (grant.isPaid) return;
+  if (!appliesFreeBreaker(grant.isPayingCustomer)) return;
   try {
     await breaker.record(costCents);
   } catch (err) {

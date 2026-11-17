@@ -11,7 +11,7 @@ const env = process.env;
 
 /**
  * Per-model spend rates in US cents per million tokens. Used ONLY to estimate
- * real spend for the free-tier daily breaker when Synapse does not report a
+ * real spend for the non-paying daily breaker when Synapse does not report a
  * cost; never for billing (the gateway bills the pooled Aether balance)
  */
 interface ModelRate {
@@ -107,7 +107,16 @@ interface AiConfig {
   requestTimeoutMs: number;
   /** Maximum repair attempts honored per logical generation (enforced server-side). */
   maxRepairAttempts: number;
-  /** Free-tier managed spend ceiling per UTC day in US cents (the breaker backstop). */
+  /**
+   * Non-paying managed spend ceiling per UTC day in US cents (the breaker
+   * backstop). Belt-and-braces only: managed AI is refused to non-paying
+   * workspaces before the breaker, so it never blocks a paying customer and
+   * only engages if eligibility is ever widened. Must be a positive integer:
+   * `0`, a negative, or an unparseable value falls back to the 500 default
+   * here, so this setting can never disable the breaker (the shared breaker
+   * treats a ceiling of 0 or less as disabled, but this layer never passes
+   * one). Set `1` to trip on the first cent
+   */
   dailySpendCeilingCents: number;
   /** Per-IP rate limit window in milliseconds. */
   rateLimitWindowMs: number;

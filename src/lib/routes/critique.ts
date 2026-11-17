@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 
 import { getAiConfig } from "lib/config/ai.config";
+import { ERROR_CODES } from "lib/routes/errorCodes";
 import {
   classifyUpstreamFailure,
   recordFreeSpend,
@@ -9,6 +10,7 @@ import {
 import { resolveGenerationId } from "lib/routes/telemetry";
 
 import type { RateLimiter } from "lib/cost/rateLimit";
+import type { ErrorReason } from "lib/routes/errorCodes";
 import type { ManagedDeps } from "lib/routes/managedAccess";
 import type { GenerationEvents } from "lib/routes/telemetry";
 import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
@@ -21,7 +23,9 @@ import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
  *
  * Money-safety is IDENTICAL to /generate (the same shared managed gating in
  * `managedAccess.ts`): a signed-in Omni identity, the limited-preview
- * whitelist, the free-tier daily breaker, a product-scoped key billed by the
+ * whitelist, the paying-customer gate (402 `payment_required` for a free,
+ * never-paid workspace), the belt-and-braces free-tier daily breaker, a
+ * product-scoped key billed by the
  * gateway against the user's personal workspace balance (no shared-key
  * fallback), the per-IP limiter, and per-request caps. BYOK bypasses all of it
  * at zero cost to us. Keep this in lockstep with generate.ts
@@ -69,6 +73,8 @@ const MESSAGES = {
   unauthorized: "Sign in to use managed AI critique, or provide your own key.",
   reauth: "Sign in again to keep using AI generation.",
   notAllowed: "Managed AI generation is in limited preview.",
+  paymentRequired:
+    "AI generation uses Omni credits. Buy credits or upgrade to Pro to start, or use your own key.",
   planRequired:
     "Your plan does not include managed AI critique. Upgrade your plan, or provide your own key.",
   usageLimited:
@@ -77,7 +83,16 @@ const MESSAGES = {
     "You are out of AI credits. Buy more credits to keep going, or provide your own key.",
   unavailable: "AI critique is temporarily unavailable.",
   failed: "AI critique failed. Please try again.",
-} as const;
+} as const satisfies Partial<Record<ErrorReason, string>>;
+
+/**
+ * A user-safe error body: the human message plus a stable `code` the client
+ * branches on (e.g. `payment_required` versus `out_of_credits`)
+ */
+const errorBody = (reason: keyof typeof MESSAGES) => ({
+  error: MESSAGES[reason],
+  code: ERROR_CODES[reason],
+});
 
 const ALLOWED_MEDIA = new Set([
   "image/png",
@@ -160,13 +175,13 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
       !ALLOWED_MEDIA.has(mediaType)
     ) {
       set.status = 400;
-      return { error: MESSAGES.badInput };
+      return errorBody("badInput");
     }
 
     // 2. per-IP rate limit
     if (!deps.rateLimiter.allow(clientIp(request))) {
       set.status = 429;
-      return { error: MESSAGES.rateLimited };
+      return errorBody("rateLimited");
     }
 
     // 3. managed-path gating and the product-scoped key (BYOK bypasses every
@@ -180,13 +195,13 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
       : await resolveManagedAccess(deps, request, logFailure);
     if (access && !access.ok) {
       set.status = access.status;
-      return { error: MESSAGES[access.reason] };
+      return errorBody(access.reason);
     }
     const grant = access?.ok ? access : undefined;
     const apiKey = byokKey ?? grant?.apiKey;
     if (!apiKey) {
       set.status = 503;
-      return { error: MESSAGES.unavailable };
+      return errorBody("unavailable");
     }
 
     // 4. build the multimodal critique turn (text + the render)
@@ -221,10 +236,11 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
         ? classifyUpstreamFailure(err)
         : { status: 502, reason: "failed" as const };
       set.status = failure.status;
-      return { error: MESSAGES[failure.reason] };
+      return errorBody(failure.reason);
     }
 
-    // 6. record free-tier real spend against the breaker - mirrors generate
+    // 6. record non-paying real spend against the breaker (never a paying
+    // customer's) - mirrors generate
     if (grant) {
       await recordFreeSpend(
         deps.breaker,
@@ -237,7 +253,7 @@ export const createCritiqueRoute = (deps: CritiqueDeps) =>
     const critique = parseCritique(result.text);
     if (!critique) {
       set.status = 422;
-      return { error: MESSAGES.failed };
+      return errorBody("failed");
     }
 
     // emit the verdict for fleet analytics (fire-and-forget: never blocks or
