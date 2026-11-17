@@ -4,15 +4,15 @@ The Facet AI generation gateway. A thin [Elysia](https://elysiajs.com) service w
 
 Facet itself stays a static SPA for local modeling. This gateway owns what the browser must never hold: the gateway secret that provisions a product-scoped Synapse key for each signed-in user. It builds a grounded prompt from the Facet authoring API, calls Synapse's Anthropic-compatible `POST /v1/messages` with that key, extracts the fenced TypeScript block, and returns it.
 
-Billing is the Synapse gateway's job, not this service's. A managed call carries a key scoped to the `facet` Aether app and billed to the user, so the gateway checks the user's credit balance (refusing with `402` before any spend when it is empty), meters the call, and debits the balance. That balance is one pooled Aether balance per billing account, shared across every Omni product (1 credit = $0.01). Facet keeps no credit ledger and computes no credits of its own.
+Billing is the Synapse gateway's job, not this service's. A managed call carries a key scoped to the `facet` Aether app and billed to the signed-in user's **personal workspace** (the Omni organization Gatekeeper creates for every user), so the gateway checks that workspace's plan and credit balance (refusing with `402` before any spend when it is empty), meters the call, and debits the balance. This is the same billing account the Omni account hub puts a paid plan, its `tier` entitlement, and its included credits on, so a plan bought there applies in Facet. That balance is one pooled Aether balance per billing account, shared across every Omni product (1 credit = $0.01). Facet keeps no credit ledger and computes no credits of its own. Identity concerns (the managed whitelist, rate limiting, telemetry, and AI-training consent) stay per user.
 
 ## What it exposes
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/generate` | Turn a prompt into Facet TypeScript. Managed (product-scoped key, billed to the user's credits) or BYOK (caller's key). |
+| `POST` | `/generate` | Turn a prompt into Facet TypeScript. Managed (product-scoped key, billed to the personal workspace's credits) or BYOK (caller's key). |
 | `POST` | `/critique` | Score a render of a generated part against the request (vision). Same gating as `/generate`. |
-| `GET` | `/capabilities` | Whether the caller may use managed generation, plus their tier and pooled credit balance. |
+| `GET` | `/capabilities` | Whether the caller may use managed generation, plus their personal workspace's tier, pooled credit balance, and slug (`workspace.slug`, for account-hub links). |
 | `GET` | `/health` | Liveness. |
 | `GET` | `/ready` | Readiness (DB connectivity, used from Phase C on). |
 
@@ -31,7 +31,7 @@ Request:
 }
 ```
 
-The managed path (no `byokKey`) requires a signed-in Omni user: send the user's access token as `Authorization: Bearer <token>` (the same Better Auth / Gatekeeper token the rest of the fleet uses). A missing or invalid token returns `401`; a user whose credit balance is empty gets `402` (out of credits: buy more credits in the Omni account hub); a temporarily unavailable gateway or a failed key provisioning returns `503`. BYOK requests need no auth and never touch Facet credits.
+The managed path (no `byokKey`) requires a signed-in Omni user: send the user's access token as `Authorization: Bearer <token>` (the same Better Auth / Gatekeeper token the rest of the fleet uses). The token must carry the `organization` scope, since the personal workspace is read from the Gatekeeper userinfo organizations claim (`https://manifold.omni.dev/@omni/claims/organizations`, the entry with `type: "personal"`). A missing or invalid token returns `401`; a workspace whose credit balance is empty gets `402` (out of credits: buy more credits in the Omni account hub); a plan that does not grant managed AI gets `403`; a workspace that has reached its usage limit gets `429`; a signed-in token with no personal workspace in its claims (e.g. issued without the `organization` scope) returns `401` asking the user to sign in again, never a fallback to billing the user, and `GET /capabilities` reports `reauthRequired: true`; a temporarily unavailable gateway or a failed key provisioning returns `503`. BYOK requests need no auth and never touch Facet credits.
 
 Response:
 
@@ -48,9 +48,9 @@ Response:
 
 Defense-in-depth. Each layer is independent, so a bug in one does not defeat the others:
 
-1. **No shared managed key.** Every managed call uses a per-user key provisioned via `SYNAPSE_API_URL` + `SYNAPSE_GATEWAY_SECRET` and scoped to the `facet` Aether app. If provisioning is not configured or fails, managed AI returns `503`; there is no fallback to an unbilled shared key. The gateway secret lives only here, never `VITE_`-prefixed, never in a response body or a log.
-2. **Gateway-enforced credits.** The Synapse gateway checks the user's pooled Aether balance before spending (`402` when empty, surfaced as "out of credits") and debits it after. A `402` is never retried on the backup model.
-3. **Free-tier daily spend breaker.** Aggregate free-tier managed spend is tracked per UTC day in real cents (whole cents, rounded up) in the `daily_spend` table; free users get `503` once `DAILY_SPEND_CEILING_CENTS` is hit. The user's tier comes from the Aether `tier` entitlement, so paid users are never blocked by free-tier abuse. Spend is the gateway's reported cost when present, else an estimate from list prices; the estimate feeds only this backstop, never billing.
+1. **No shared managed key.** Every managed call uses a per-user key billed to the user's personal workspace, provisioned via `SYNAPSE_API_URL` + `SYNAPSE_GATEWAY_SECRET` and scoped to the `facet` Aether app. If provisioning is not configured or fails, managed AI returns `503`; there is no fallback to an unbilled shared key. The gateway secret lives only here, never `VITE_`-prefixed, never in a response body or a log.
+2. **Gateway-enforced credits.** The Synapse gateway checks the personal workspace's pooled Aether balance before spending (`402` when empty, surfaced as "out of credits") and debits it after. A `402` is never retried on the backup model.
+3. **Free-tier daily spend breaker.** Aggregate free-tier managed spend is tracked per UTC day in real cents (whole cents, rounded up) in the `daily_spend` table; free users get `503` once `DAILY_SPEND_CEILING_CENTS` is hit. The tier comes from the personal workspace's Aether `tier` entitlement, so paid users are never blocked by free-tier abuse. Spend is the gateway's reported cost when present, else an estimate from list prices; the estimate feeds only this backstop, never billing.
 4. **Auth-gated managed path.** The managed path requires a valid signed-in Omni identity (bearer token verified via Gatekeeper); no anonymous access to paid inference, `401` otherwise.
 5. **Per-request caps.** `MAX_PROMPT_CHARS`, `MAX_OUTPUT_TOKENS`, a request timeout, and `MAX_REPAIR_ATTEMPTS`, all enforced server-side.
 6. **Per-IP rate limit.** Sliding-window limiter on `/generate`; `429` on exceed.
@@ -78,7 +78,7 @@ The service boots with nothing set. Every variable is optional; the managed path
 | `RATE_LIMIT_MAX` | `20` | Max requests per IP per window. |
 | `AUTH_BASE_URL` | `https://localhost:8000` | Gatekeeper base URL used to verify the managed path's bearer token. |
 | `DATABASE_URL` | _(unset)_ | Postgres connection for the daily spend breaker. The free-tier managed path needs it; BYOK does not. |
-| `BILLING_BASE_URL` | _(unset)_ | Aether base URL, for the user's tier and pooled credit balance. Unset: everyone reads as free tier and no balance is shown. |
+| `BILLING_BASE_URL` | _(unset)_ | Aether base URL, for the personal workspace's tier and pooled credit balance. Unset: everyone reads as free tier and no balance is shown. |
 | `BILLING_SERVICE_API_KEY` | _(unset)_ | Aether service API key (`x-service-api-key`), required for the credit balance read. |
 | `BILLING_WEBHOOK_SECRET` | _(unset)_ | Verifies Aether entitlement webhooks, which invalidate the cached tier. |
 

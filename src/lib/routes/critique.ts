@@ -21,10 +21,10 @@ import type { SynapseContentBlock, callSynapse } from "lib/synapse/client";
  *
  * Money-safety is IDENTICAL to /generate (the same shared managed gating in
  * `managedAccess.ts`): a signed-in Omni identity, the limited-preview
- * allowlist, the free-tier daily breaker, a product-scoped key billed by the
- * gateway against the user's pooled balance (no shared-key fallback), the
- * per-IP limiter, and per-request caps. BYOK bypasses all of it at zero cost
- * to us. Keep this in lockstep with generate.ts
+ * whitelist, the free-tier daily breaker, a product-scoped key billed by the
+ * gateway against the user's personal workspace balance (no shared-key
+ * fallback), the per-IP limiter, and per-request caps. BYOK bypasses all of it
+ * at zero cost to us. Keep this in lockstep with generate.ts
  */
 
 interface CritiqueDeps extends ManagedDeps {
@@ -67,7 +67,12 @@ const MESSAGES = {
   badInput: "Missing prompt, code, or render image.",
   rateLimited: "Too many requests. Please slow down and try again.",
   unauthorized: "Sign in to use managed AI critique, or provide your own key.",
+  reauth: "Sign in again to keep using AI generation.",
   notAllowed: "Managed AI generation is in limited preview.",
+  planRequired:
+    "Your plan does not include managed AI critique. Upgrade your plan, or provide your own key.",
+  usageLimited:
+    "You have reached your AI usage limit. Try again later or upgrade your plan, or provide your own key.",
   outOfCredits:
     "You are out of AI credits. Buy more credits to keep going, or provide your own key.",
   unavailable: "AI critique is temporarily unavailable.",

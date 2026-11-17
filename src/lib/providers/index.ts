@@ -26,8 +26,8 @@ export const authz = createAuthzProvider({
   apiUrl: AUTHZ_API_URL,
 });
 
-// Aether for the facet app: the user's tier entitlement and their pooled
-// credit balance. Without BILLING_BASE_URL this degrades to the noop provider
+// Aether for the facet app: the tier entitlement and pooled credit balance of
+// the user's personal workspace (the billing entity). Without BILLING_BASE_URL this degrades to the noop provider
 // (every user reads as free with no known balance)
 export const billing = createBillingProvider(
   BILLING_BASE_URL

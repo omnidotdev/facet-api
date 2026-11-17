@@ -23,13 +23,13 @@ import type { callSynapse } from "lib/synapse/client";
  * POST /generate - a money-spending route.
  *
  * Billing is the Synapse gateway's: a managed call carries a product-scoped key
- * for the facet Aether app, so the gateway checks the user's pooled credit
- * balance (402 before any spend when it is empty), meters the call, and debits
- * the balance. Facet computes no credits of its own. Money-safety around that is
+ * for the facet Aether app billed to the user's personal workspace, so the
+ * gateway checks that workspace's plan and pooled credit balance (402 before
+ * any spend when it is empty), meters the call, and debits the balance. Facet computes no credits of its own. Money-safety around that is
  * defense-in-depth and each layer is independent (see `managedAccess.ts`):
- * - managed generation requires a signed-in Omni identity and a provisioned
- *   product-scoped key; there is no shared key to fall back to, so a
- *   provisioning failure is a 503, never unbilled spend
+ * - managed generation requires a signed-in Omni identity with a personal
+ *   workspace and a provisioned product-scoped key; there is no shared key to
+ *   fall back to, so a provisioning failure is a 503, never unbilled spend
  * - the global daily breaker (real cents) gates the FREE tier only, so free-tier
  *   abuse (Sybil farming) cannot exhaust the ceiling and block paying users
  * - per-request caps (prompt length, output tokens, timeout) bound each call
@@ -84,7 +84,12 @@ const MESSAGES = {
     "Too many repair attempts. Please adjust your prompt and try again.",
   unauthorized:
     "Sign in to use managed AI generation, or provide your own key.",
+  reauth: "Sign in again to keep using AI generation.",
   notAllowed: "Managed AI generation is in limited preview.",
+  planRequired:
+    "Your plan does not include managed AI generation. Upgrade your plan, or provide your own key.",
+  usageLimited:
+    "You have reached your AI usage limit. Try again later or upgrade your plan, or provide your own key.",
   outOfCredits:
     "You are out of AI credits. Buy more credits to keep generating, or provide your own key.",
   unavailable: "AI generation is temporarily unavailable.",
@@ -210,7 +215,8 @@ export const createGenerateRoute = (deps: GenerateDeps) =>
     } catch (err) {
       logFailure(err instanceof Error ? err.message : "unknown upstream error");
       // BYOK failures stay generic; a managed refusal maps the gateway status
-      // (402 out of credits, 503 unavailable) onto the user's next step
+      // (402 out of credits, 403 plan, 429 usage limit, 503 unavailable) onto
+      // the user's next step
       const failure = grant
         ? classifyUpstreamFailure(err)
         : { status: 502, reason: "failed" as const };
