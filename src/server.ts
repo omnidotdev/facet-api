@@ -36,6 +36,8 @@ import { dbPool, pgPool } from "lib/db";
 import ensureDatabase from "lib/db/ensureDatabase";
 import createGraphqlContext from "lib/graphql/createGraphqlContext";
 import { armorPlugin, createAuthenticationPlugin } from "lib/graphql/plugins";
+import { createGenerationJobStore } from "lib/jobs/generationJobStore";
+import { createGenerationWorker } from "lib/jobs/generationWorker";
 import { createPlatformConsentClient } from "lib/platform/consentClient";
 import { billing, events } from "lib/providers";
 import { createCapabilitiesRoute } from "lib/routes/capabilities";
@@ -43,6 +45,7 @@ import { createConsentRoute } from "lib/routes/consent";
 import { createCritiqueRoute } from "lib/routes/critique";
 import { createDispositionRoute } from "lib/routes/disposition";
 import { createGenerateRoute } from "lib/routes/generate";
+import { createGenerationsRoute } from "lib/routes/generations";
 import { createImportRoute } from "lib/routes/import";
 import { createSampleStore } from "lib/routes/sampleStore";
 import { callSynapse } from "lib/synapse/client";
@@ -147,6 +150,28 @@ const provisioner =
       })
     : undefined;
 
+// Background managed generation (POST /generations): jobs live in the database
+// and an in-process worker runs them with bounded concurrency, so a generation
+// keeps going (and its result waits) when the user closes the panel or leaves.
+// Claims are replica-safe; a job is never retried after its Synapse call, and
+// one left running by a dead process is failed as interrupted by the sweep.
+// The worker only runs when managed AI is configured (nothing can be queued
+// otherwise). A job's prompt and result are deleted on dismissal or after 24
+// hours, whichever comes first
+const jobStore = createGenerationJobStore(dbPool);
+const generationWorker = provisioner
+  ? createGenerationWorker({
+      store: jobStore,
+      callSynapse,
+      breaker: spendBreaker,
+      events,
+      samples: sampleStore,
+      provisioner,
+      concurrency: aiConfig.jobWorkerConcurrency,
+    })
+  : undefined;
+generationWorker?.start();
+
 /**
  * Elysia server.
  */
@@ -173,7 +198,7 @@ const app = new Elysia({
   .use(
     cors({
       origin: corsAllowedOrigins,
-      methods: ["GET", "POST"],
+      methods: ["GET", "POST", "DELETE"],
     }),
   )
   // rate limiting
@@ -222,6 +247,20 @@ const app = new Elysia({
       provisioner,
       resolveTier,
       resolveFunding,
+    }),
+  )
+  // Background managed generation: the same gates as /generate, then a queued
+  // job the worker runs, plus the caller's own job list, read, and dismiss
+  .use(
+    createGenerationsRoute({
+      store: jobStore,
+      breaker: spendBreaker,
+      rateLimiter: aiRateLimiter,
+      authenticate: authenticateUser,
+      provisioner,
+      resolveTier,
+      resolveFunding,
+      onEnqueued: () => generationWorker?.notify(),
     }),
   )
   // AI vision critique (a money-spending route; same gating as /generate). Grounds
@@ -325,6 +364,10 @@ const shutdown = async (signal: string) => {
 
   // Stop accepting new connections
   app.stop();
+
+  // Stop claiming jobs and fail this instance's in-flight ones as interrupted
+  // (never silently re-run; the user retries)
+  await generationWorker?.stop();
 
   // Close database pool
   await pgPool.end();

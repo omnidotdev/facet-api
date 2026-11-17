@@ -77,7 +77,7 @@ type ManagedDenial =
  * scoped key, and whether it is a paying customer (only a non-paying grant is
  * subject to the free-tier breaker)
  */
-interface ManagedGrant {
+export interface ManagedGrant {
   ok: true;
   userId: string;
   workspaceId: string;
@@ -159,16 +159,46 @@ export const resolveManagedAccess = async (
     return { ok: false, status: 503, reason: "unavailable" };
   }
 
-  // the key is the user's (identity) but bills their personal workspace. The
-  // provisioner and Synapse key each key by billing entity, so a key minted
-  // for another entity is never reused here
+  const key = await provisionManagedKey(
+    deps.provisioner,
+    userId,
+    workspaceId,
+    logFailure,
+  );
+  if (!key.ok) return key;
+  return {
+    ok: true,
+    userId,
+    workspaceId,
+    apiKey: key.apiKey,
+    isPayingCustomer,
+  };
+};
+
+/**
+ * Resolve the product-scoped managed key for a user, billed to their personal
+ * workspace. Shared by the request gate above and the background job worker,
+ * which provisions again when a job runs (a key is never stored with a job).
+ * The provisioner and Synapse key each key by billing entity, so a key minted
+ * for another entity is never reused here
+ */
+export const provisionManagedKey = async (
+  provisioner: ManagedKeyProvisioner,
+  userId: string,
+  workspaceId: string,
+  logFailure: (reason: string) => void,
+): Promise<
+  | { ok: true; apiKey: string }
+  | { ok: false; status: 403; reason: "planRequired" }
+  | { ok: false; status: 503; reason: "unavailable" }
+> => {
   try {
-    const apiKey = await deps.provisioner.resolveKey(
+    const apiKey = await provisioner.resolveKey(
       userId,
       undefined,
       workspaceBillingEntity(workspaceId),
     );
-    return { ok: true, userId, workspaceId, apiKey, isPayingCustomer };
+    return { ok: true, apiKey };
   } catch (err) {
     logFailure(`managed key provisioning failed: ${errorText(err)}`);
     // Synapse refuses provisioning with 403 when the workspace's plan does not

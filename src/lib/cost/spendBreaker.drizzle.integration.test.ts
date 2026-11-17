@@ -49,7 +49,8 @@ describe.skipIf(!canRun)("createDrizzleSpendBreaker (Postgres)", () => {
       uri = container.getConnectionUri();
     }
     ctx = await createTestDatabase(uri);
-  });
+    // a cold container start can outlast the default hook timeout
+  }, 60_000);
 
   afterAll(async () => {
     await ctx?.cleanup();
