@@ -149,13 +149,14 @@ const makeAuthenticator = (
 const makeCaller = (
   text: string,
   costCents = 1.4,
-): { caller: Caller; calls: { apiKey?: string }[] } => {
-  const calls: { apiKey?: string }[] = [];
-  const caller = (async (input: { apiKey?: string }) => {
-    calls.push({ apiKey: input.apiKey });
+  outputTokens = 50,
+): { caller: Caller; calls: { apiKey?: string; maxTokens?: number }[] } => {
+  const calls: { apiKey?: string; maxTokens?: number }[] = [];
+  const caller = (async (input: { apiKey?: string; maxTokens?: number }) => {
+    calls.push({ apiKey: input.apiKey, maxTokens: input.maxTokens });
     return {
       text,
-      usage: { inputTokens: 100, outputTokens: 50, costCents },
+      usage: { inputTokens: 100, outputTokens, costCents },
     };
   }) as Caller;
   return { caller, calls };
@@ -641,7 +642,7 @@ describe("POST /generate", () => {
       const res = await request({ prompt: "a cube", byokKey: "byok-xyz" });
 
       expect(res.status).toBe(200);
-      expect(calls).toEqual([{ apiKey: "byok-xyz" }]);
+      expect(calls.map((c) => c.apiKey)).toEqual(["byok-xyz"]);
       expect(authCalls.count).toBe(0);
       expect(provisionCalls).toHaveLength(0);
       expect(request.tierCalls).toHaveLength(0);
@@ -777,6 +778,27 @@ describe("POST /generate", () => {
     expect(res.status).toBe(422);
     const json = await res.json();
     expect(typeof json.error).toBe("string");
+  });
+
+  test("reports a truncated generation when the output hits the token ceiling", async () => {
+    process.env.MAX_OUTPUT_TOKENS = "4096";
+    const { caller } = makeCaller("```ts\nconst a = cube(", 1.4, 4096);
+    const request = makeApp({ caller });
+    const res = await request({ prompt: "a very detailed gearbox" });
+
+    expect(res.status).toBe(422);
+    const json = await res.json();
+    expect(json.code).toBe("truncated");
+    expect(typeof json.error).toBe("string");
+  });
+
+  test("asks the model for the configured output ceiling", async () => {
+    process.env.MAX_OUTPUT_TOKENS = "4096";
+    const { caller, calls } = makeCaller(FENCED);
+    const request = makeApp({ caller });
+    await request({ prompt: "a cube" });
+
+    expect(calls[0]?.maxTokens).toBe(4096);
   });
 
   test("returns 429 when the per-IP rate limit is exceeded", async () => {

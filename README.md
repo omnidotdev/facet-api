@@ -71,8 +71,8 @@ The service boots with nothing set. Every variable is optional; the managed path
 | `FACET_AI_MODEL` | `auto` | Model passed through to Synapse (a virtual routed model or a provider-prefixed id). |
 | `FACET_AI_FALLBACK_MODEL` | `anthropic/claude-sonnet-4-5-20250929` | Concrete model used if the gateway refuses a virtual model (never on a `402`). |
 | `MAX_PROMPT_CHARS` | `2000` | Maximum accepted prompt length. |
-| `MAX_OUTPUT_TOKENS` | `2048` | Output token ceiling per call. |
-| `AI_REQUEST_TIMEOUT_MS` | `30000` | Synapse request timeout. |
+| `MAX_OUTPUT_TOKENS` | `8192` | Output token ceiling per call, including the model's hidden thinking. |
+| `AI_REQUEST_TIMEOUT_MS` | `90000` | Synapse request timeout. |
 | `MAX_REPAIR_ATTEMPTS` | `2` | Repair-attempt ceiling per generation. |
 | `DAILY_SPEND_CEILING_CENTS` | `500` | Non-paying managed spend breaker, real cents per UTC day. Must be a positive integer: `0` or an invalid value falls back to `500` (it cannot disable the breaker); `1` trips on the first cent. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP rate-limit window. |

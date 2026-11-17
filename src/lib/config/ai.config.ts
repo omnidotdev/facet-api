@@ -101,9 +101,15 @@ interface AiConfig {
   managedEnabled: boolean;
   /** Maximum accepted prompt length in characters. */
   maxPromptChars: number;
-  /** Maximum output tokens requested from the model. */
+  /**
+   * Maximum output tokens requested from the model. Current models think by
+   * default and their hidden thinking counts toward this ceiling, so it must
+   * leave room for thinking plus the code (2048 cut real parts off mid-code).
+   * The catalog's per-request output limit for Facet is 8192, so going higher
+   * would be clamped by the gateway
+   */
   maxOutputTokens: number;
-  /** Request timeout to Synapse in milliseconds. */
+  /** Request timeout to Synapse in milliseconds, sized for a full output budget. */
   requestTimeoutMs: number;
   /** Maximum repair attempts honored per logical generation (enforced server-side). */
   maxRepairAttempts: number;
@@ -156,8 +162,8 @@ export const getAiConfig = (): AiConfig => {
     fallbackRate: rateForModel(fallbackModel),
     managedEnabled: Boolean(synapseApiUrl && synapseGatewaySecret),
     maxPromptChars: toInt(env.MAX_PROMPT_CHARS, 2000),
-    maxOutputTokens: toInt(env.MAX_OUTPUT_TOKENS, 2048),
-    requestTimeoutMs: toInt(env.AI_REQUEST_TIMEOUT_MS, 30_000),
+    maxOutputTokens: toInt(env.MAX_OUTPUT_TOKENS, 8192),
+    requestTimeoutMs: toInt(env.AI_REQUEST_TIMEOUT_MS, 90_000),
     maxRepairAttempts: toInt(env.MAX_REPAIR_ATTEMPTS, 2),
     dailySpendCeilingCents: toInt(env.DAILY_SPEND_CEILING_CENTS, 500),
     rateLimitWindowMs: toInt(env.RATE_LIMIT_WINDOW_MS, 60_000),
