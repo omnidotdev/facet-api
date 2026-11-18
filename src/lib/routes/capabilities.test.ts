@@ -37,6 +37,7 @@ const FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 10,
   isPayingCustomer: true,
+  cardVerified: false,
 };
 
 /** A free-tier workspace that never paid */
@@ -44,6 +45,7 @@ const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: null,
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 const probe = (
@@ -288,6 +290,33 @@ describe("/capabilities", () => {
         credits: { balance: 50 },
       });
       expect(fundingCalls).toEqual(["ws-user-1"]);
+    });
+
+    test("a free workspace with a verified card is eligible on the free allowance", async () => {
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling(0.5).billing,
+          "free",
+          undefined,
+          [],
+          {
+            billingAccountId: "acct-1",
+            paidCreditsUsd: 0,
+            isPayingCustomer: false,
+            cardVerified: true,
+          },
+        )
+      ).json();
+      expect(body).toEqual({
+        signedIn: true,
+        managedGeneration: true,
+        tier: "free",
+        freeAllowance: true,
+        aiTrainingConsent: false,
+        workspace: { slug: "user-1" },
+        credits: { balance: 50 },
+      });
     });
 
     test("a free, never-paid workspace is told payment is required, with its tier, slug, and balance", async () => {

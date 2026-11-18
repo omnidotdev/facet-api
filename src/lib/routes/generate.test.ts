@@ -46,6 +46,15 @@ const FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 10,
   isPayingCustomer: true,
+  cardVerified: false,
+};
+
+/** A free-tier workspace that never paid but whose owner verified a card */
+const CARD_VERIFIED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 0,
+  isPayingCustomer: false,
+  cardVerified: true,
 };
 
 /** A free-tier workspace that never paid (only free grants, if any) */
@@ -53,6 +62,7 @@ const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 /** A breaker spy that counts every touch, never tripped */
@@ -625,6 +635,45 @@ describe("POST /generate", () => {
 
       expect(res.status).toBe(200);
       expect(touched).toEqual({ isTripped: 0, record: 0 });
+    });
+  });
+
+  describe("card-verified free allowance", () => {
+    test("a free workspace with a verified card is served", async () => {
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, funding: CARD_VERIFIED });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    test("its spend counts toward the free-tier breaker", async () => {
+      const { breaker, touched } = makeBreakerSpy();
+      const request = makeApp({
+        caller: makeCaller(FENCED, 5).caller,
+        breaker,
+        funding: CARD_VERIFIED,
+      });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(200);
+      expect(touched.isTripped).toBe(1);
+      expect(touched.record).toBe(1);
+    });
+
+    test("a tripped breaker refuses it before any call", async () => {
+      const breaker = createSpendBreaker(100);
+      await breaker.record(100);
+      const { caller, calls } = makeCaller(FENCED);
+      const request = makeApp({ caller, breaker, funding: CARD_VERIFIED });
+
+      const res = await request({ prompt: "a cube" });
+
+      expect(res.status).toBe(503);
+      expect(calls).toHaveLength(0);
     });
   });
 

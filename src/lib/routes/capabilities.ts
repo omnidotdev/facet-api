@@ -48,9 +48,10 @@ interface CapabilitiesDeps {
  * workspace slug (`workspace.slug`) so the client can link to that workspace's
  * plan and credits in the account hub.
  *
- * Managed AI is for paying customers only (a paid tier, or a workspace that
- * bought credits), mirroring the gate in `managedAccess.ts`. A signed-in,
- * whitelisted user whose workspace has never paid gets `managedGeneration:
+ * Managed AI is for paying customers (a paid tier, or a workspace that
+ * bought credits) and the card-verified free allowance (`freeAllowance: true`,
+ * served the free model), mirroring the gate in `managedAccess.ts`. A
+ * signed-in, whitelisted user whose workspace has neither gets `managedGeneration:
  * false` with `paymentRequired: true`, plus the tier, workspace slug, and
  * balance when known, so the app can offer buy credits, upgrade, or BYOK
  */
@@ -94,17 +95,20 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
     // default), never blocks the capability probe. Eligibility fails closed (a
     // funding failure reads as not paying). Tier, funding, and balance are the
     // workspace's (billing); consent is the user's own (identity)
-    const [{ tier, isPayingCustomer }, balance, aiTrainingConsent] =
-      await Promise.all([
-        resolveManagedEligibility(deps, workspace.id),
-        getWorkspaceCreditBalance(deps.billing, workspace.id)
-          .then((usd) => (usd !== null ? creditsFromBalanceUsd(usd) : null))
-          .catch(() => null),
-        deps.store?.getConsent(identity.userId).catch(() => false) ?? false,
-      ]);
+    const [
+      { tier, isPayingCustomer, freeAllowance },
+      balance,
+      aiTrainingConsent,
+    ] = await Promise.all([
+      resolveManagedEligibility(deps, workspace.id),
+      getWorkspaceCreditBalance(deps.billing, workspace.id)
+        .then((usd) => (usd !== null ? creditsFromBalanceUsd(usd) : null))
+        .catch(() => null),
+      deps.store?.getConsent(identity.userId).catch(() => false) ?? false,
+    ]);
     const credits = balance !== null ? { credits: { balance } } : {};
 
-    if (!isPayingCustomer) {
+    if (!isPayingCustomer && !freeAllowance) {
       return {
         signedIn: true,
         managedGeneration: false,
@@ -119,6 +123,7 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
       signedIn: true,
       managedGeneration,
       tier,
+      ...(freeAllowance ? { freeAllowance: true } : {}),
       aiTrainingConsent,
       workspace: { slug: workspace.slug },
       ...credits,

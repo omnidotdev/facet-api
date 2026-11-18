@@ -66,6 +66,7 @@ const FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 10,
   isPayingCustomer: true,
+  cardVerified: false,
 };
 
 /** A free-tier workspace that never paid */
@@ -73,6 +74,7 @@ const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: null,
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 const makeProvisioner = () => {

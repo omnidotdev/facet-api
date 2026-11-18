@@ -19,11 +19,13 @@ const FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 10,
   isPayingCustomer: true,
+  cardVerified: false,
 };
 const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 /** Resolve the signed-in user from a `x-test-user` header (absent is signed out) */
