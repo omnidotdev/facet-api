@@ -16,7 +16,7 @@ Billing is the Synapse gateway's job, not this service's. A managed call carries
 | `GET` | `/generations/:id` | One of the caller's jobs (`404` otherwise). |
 | `DELETE` | `/generations/:id` | Dismiss one of the caller's jobs, deleting its prompt and result (`204`). |
 | `POST` | `/critique` | Score a render of a generated part against the request (vision). Same gating as `/generate`. |
-| `GET` | `/capabilities` | Whether the caller may use managed generation, plus their personal workspace's tier, pooled credit balance, and slug (`workspace.slug`, for account-hub links). A signed-in user whose workspace has no paid tier and never bought credits gets `managedGeneration: false` with `paymentRequired: true` (plus `tier`, `workspace`, and `credits` when known) so the app can offer buy credits, upgrade, or BYOK. |
+| `GET` | `/capabilities` | Whether the caller may use managed generation, plus their personal workspace's tier, pooled credit balance, and slug (`workspace.slug`, for account-hub links). A signed-in user whose workspace holds the card-verified free allowance gets `managedGeneration: true` with `freeAllowance: true` (the gateway serves it the free model). One whose workspace has no paid tier, never bought credits, and has no verified card gets `managedGeneration: false` with `paymentRequired: true` (plus `tier`, `workspace`, and `credits` when known) so the app can offer buy credits, upgrade, or BYOK. |
 | `GET` | `/health` | Liveness. |
 | `GET` | `/ready` | Readiness (DB connectivity, used from Phase C on). |
 
@@ -94,7 +94,7 @@ The service boots with nothing set. Every variable is optional; the managed path
 | `GENERATION_WORKER_CONCURRENCY` | `4` | Most background generation jobs one instance runs at once. |
 | `AUTH_BASE_URL` | `https://localhost:8000` | Gatekeeper base URL used to verify the managed path's bearer token. |
 | `DATABASE_URL` | _(unset)_ | Postgres connection for the daily spend breaker. The managed path needs it; BYOK does not. |
-| `BILLING_BASE_URL` | _(unset)_ | Aether base URL, for the personal workspace's tier, funding (whether it bought credits), and pooled credit balance. Unset: everyone reads as a free non-payer, managed AI is refused, and no balance is shown. |
+| `BILLING_BASE_URL` | _(unset)_ | Aether base URL, for the personal workspace's tier, funding (whether it bought credits or holds the card-verified free allowance), and pooled credit balance. Unset: everyone reads as a free non-payer, managed AI is refused, and no balance is shown. |
 | `BILLING_SERVICE_API_KEY` | _(unset)_ | Aether service API key (`x-service-api-key`), required for the credit balance and funding reads. Unset: only a paid tier gets managed AI. |
 | `BILLING_WEBHOOK_SECRET` | _(unset)_ | Verifies Aether entitlement webhooks, which invalidate the cached tier. |
 

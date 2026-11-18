@@ -113,12 +113,22 @@ const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: null,
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 const FUNDED = {
   billingAccountId: "acct-1",
   paidCreditsUsd: 10,
   isPayingCustomer: true,
+  cardVerified: false,
+};
+
+/** A free workspace that never paid but whose owner verified a card */
+const CARD_VERIFIED: WorkspaceFunding = {
+  billingAccountId: "acct-1",
+  paidCreditsUsd: 0,
+  isPayingCustomer: false,
+  cardVerified: true,
 };
 
 describe("createFundingResolver", () => {
@@ -140,6 +150,25 @@ describe("createFundingResolver", () => {
     );
     // every lookup is bounded by a timeout
     expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("reads a verified card only from a real boolean true", async () => {
+    for (const [cardVerified, expected] of [
+      [true, true],
+      ["true", false],
+      [1, false],
+      [undefined, false],
+    ] as const) {
+      const { fetchImpl } = makeFetch(() =>
+        Response.json({ ...NOT_FUNDED, cardVerified }),
+      );
+      const resolve = createFundingResolver({
+        baseUrl: "https://aether.test",
+        serviceApiKey: "svc-key",
+        fetch: fetchImpl,
+      });
+      expect((await resolve(WORKSPACE)).cardVerified).toBe(expected);
+    }
   });
 
   test("a workspace that never bought credits is not a paying customer", async () => {
@@ -247,7 +276,11 @@ describe("resolveManagedEligibility", () => {
       { resolveTier: async () => "pro", resolveFunding },
       WORKSPACE,
     );
-    expect(eligibility).toEqual({ tier: "pro", isPayingCustomer: true });
+    expect(eligibility).toEqual({
+      tier: "pro",
+      isPayingCustomer: true,
+      freeAllowance: false,
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -257,7 +290,11 @@ describe("resolveManagedEligibility", () => {
       { resolveTier: async () => "free", resolveFunding },
       WORKSPACE,
     );
-    expect(eligibility).toEqual({ tier: "free", isPayingCustomer: true });
+    expect(eligibility).toEqual({
+      tier: "free",
+      isPayingCustomer: true,
+      freeAllowance: false,
+    });
     expect(calls).toEqual([WORKSPACE]);
   });
 
@@ -267,7 +304,24 @@ describe("resolveManagedEligibility", () => {
       { resolveTier: async () => "free", resolveFunding },
       WORKSPACE,
     );
-    expect(eligibility).toEqual({ tier: "free", isPayingCustomer: false });
+    expect(eligibility).toEqual({
+      tier: "free",
+      isPayingCustomer: false,
+      freeAllowance: false,
+    });
+  });
+
+  test("a free workspace with a verified card gets the free allowance, never paying", async () => {
+    const { resolveFunding } = fundingOf(CARD_VERIFIED);
+    const eligibility = await resolveManagedEligibility(
+      { resolveTier: async () => "free", resolveFunding },
+      WORKSPACE,
+    );
+    expect(eligibility).toEqual({
+      tier: "free",
+      isPayingCustomer: false,
+      freeAllowance: true,
+    });
   });
 
   test("a funding resolver that throws fails closed", async () => {
@@ -277,5 +331,6 @@ describe("resolveManagedEligibility", () => {
       WORKSPACE,
     );
     expect(eligibility.isPayingCustomer).toBe(false);
+    expect(eligibility.freeAllowance).toBe(false);
   });
 });

@@ -139,19 +139,21 @@ export const resolveManagedAccess = async (
   }
   const workspaceId = personalWorkspace.id;
 
-  // managed AI is for paying customers only (a paid tier, or a workspace that
-  // bought credits): free grants on farmed accounts must never reach the
-  // managed budget. Refuse before the breaker or any key is provisioned
-  const { isPayingCustomer } = await resolveManagedEligibility(
+  // managed AI is for paying customers (a paid tier, or a workspace that
+  // bought credits) and for the card-verified free allowance (one per card,
+  // held to the free model by the gateway): free grants on farmed accounts
+  // must never reach the managed budget. Refuse before the breaker or any key
+  // is provisioned
+  const { isPayingCustomer, freeAllowance } = await resolveManagedEligibility(
     deps,
     workspaceId,
   );
-  if (!isPayingCustomer) {
+  if (!isPayingCustomer && !freeAllowance) {
     return { ok: false, status: 402, reason: "paymentRequired" };
   }
 
-  // belt-and-braces: the global daily breaker applies only to a non-paying
-  // grant, which the gate above refuses today, so it never blocks a payer
+  // emergency safety net: the global daily breaker applies only to a
+  // non-paying grant (the card-verified free allowance), never to a payer
   if (
     appliesFreeBreaker(isPayingCustomer) &&
     (await deps.breaker.isTripped())

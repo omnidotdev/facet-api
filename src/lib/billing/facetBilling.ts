@@ -96,6 +96,12 @@ export interface WorkspaceFunding {
   paidCreditsUsd: number;
   /** Whether the account has bought credits (net paid credits above zero) */
   isPayingCustomer: boolean;
+  /**
+   * Whether the account holds the card-verified free AI allowance (its owner
+   * saved a card on the account hub). Never paying: the gateway serves it the
+   * product's free model only, and the free-tier breaker counts it
+   */
+  cardVerified: boolean;
 }
 
 /** Resolve a workspace's funding; never throws, not funded on any doubt */
@@ -108,6 +114,7 @@ const NOT_FUNDED: WorkspaceFunding = {
   billingAccountId: null,
   paidCreditsUsd: 0,
   isPayingCustomer: false,
+  cardVerified: false,
 };
 
 /** Upper bound on one funding lookup, so a slow Aether cannot stall a request */
@@ -144,6 +151,7 @@ const parseFunding = (body: unknown): WorkspaceFunding | null => {
       typeof raw.billingAccountId === "string" ? raw.billingAccountId : null,
     paidCreditsUsd,
     isPayingCustomer: raw.isPayingCustomer === true && paidCreditsUsd > 0,
+    cardVerified: raw.cardVerified === true,
   };
 };
 
@@ -201,11 +209,17 @@ interface ManagedEligibility {
   tier: string;
   /** A paid tier, or a free tier whose billing account bought credits */
   isPayingCustomer: boolean;
+  /**
+   * A free tier that never paid but holds the card-verified free allowance:
+   * eligible for managed AI on the free model, under the free-tier breaker
+   */
+  freeAllowance: boolean;
 }
 
 /**
  * Decide whether a workspace may use managed AI: a paid Facet tier, OR a
- * workspace that has bought Omni credits. Free grants alone never qualify.
+ * workspace that has bought Omni credits, OR (as the free allowance) one
+ * whose owner verified a card. Free grants alone never qualify.
  * Funding is read only for a free tier (a paid tier needs no second lookup),
  * and a resolver that throws fails closed
  */
@@ -214,10 +228,16 @@ export const resolveManagedEligibility = async (
   workspaceId: string,
 ): Promise<ManagedEligibility> => {
   const tier = await deps.resolveTier(workspaceId);
-  if (isPaidTier(tier)) return { tier, isPayingCustomer: true };
+  if (isPaidTier(tier))
+    return { tier, isPayingCustomer: true, freeAllowance: false };
 
   const funding = await deps
     .resolveFunding(workspaceId)
     .catch(() => NOT_FUNDED);
-  return { tier, isPayingCustomer: funding.isPayingCustomer === true };
+  const isPayingCustomer = funding.isPayingCustomer === true;
+  return {
+    tier,
+    isPayingCustomer,
+    freeAllowance: !isPayingCustomer && funding.cardVerified === true,
+  };
 };
