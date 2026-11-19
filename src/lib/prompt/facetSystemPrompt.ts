@@ -167,9 +167,9 @@ const API_SPEC: ApiGroup[] = [
     entries: [
       {
         signature:
-          "param.number(name: string, opts?: { min?: number; max?: number; step?: number; default?: number }): number",
+          "param.number(name: string, opts?: { min?: number; max?: number; step?: number; default?: number; unit?: string }): number",
         summary:
-          "Register a numeric parameter and return its current value, in mm or the model's own unit.",
+          'Register a numeric parameter and return its current value, in mm or the model\'s own unit. Always set unit so the slider is labeled: unit: "mm" for any length, size, radius, or thickness, unit: "°" for an angle, and omit it only for a plain count (teeth, segments, copies).',
       },
       {
         signature:
@@ -267,10 +267,10 @@ return base;`,
   {
     prompt:
       "A 50 x 34 x 12 mm plate with a 6mm-radius hole through it, all driven by sliders.",
-    code: `const w = param.number("width", { min: 20, max: 90, default: 50, step: 1 });
-const d = param.number("depth", { min: 20, max: 90, default: 34, step: 1 });
-const h = param.number("height", { min: 4, max: 40, default: 12, step: 1 });
-const r = param.number("hole", { min: 0, max: 14, default: 6, step: 0.5 });
+    code: `const w = param.number("width", { min: 20, max: 90, default: 50, step: 1, unit: "mm" });
+const d = param.number("depth", { min: 20, max: 90, default: 34, step: 1, unit: "mm" });
+const h = param.number("height", { min: 4, max: 40, default: 12, step: 1, unit: "mm" });
+const r = param.number("hole", { min: 0, max: 14, default: 6, step: 0.5, unit: "mm" });
 
 let plate = cube([w, d, h]);
 if (r > 0) {
@@ -298,7 +298,7 @@ return part;`,
   {
     prompt:
       "A five-pointed star extruded into a 4mm-thick badge, with the star size on a slider.",
-    code: `const r = param.number("radius", { min: 10, max: 60, default: 30, step: 1 });
+    code: `const r = param.number("radius", { min: 10, max: 60, default: 30, step: 1, unit: "mm" });
 const inner = r * 0.4;
 
 const pts = [];
@@ -312,7 +312,7 @@ return extrude(polygon(pts), 4);`,
   {
     prompt:
       "A simple vase: revolve a profile so it flares from a 20mm base to a 32mm rim, 80mm tall, hollow.",
-    code: `const h = param.number("height", { min: 40, max: 140, default: 80, step: 1 });
+    code: `const h = param.number("height", { min: 40, max: 140, default: 80, step: 1, unit: "mm" });
 const base = 20;
 const rim = 32;
 const wall = 2;
@@ -348,8 +348,8 @@ return part;`,
   {
     prompt:
       "A tapered standoff: a cone from a 6mm base to a 2mm top, 24mm tall, with the height on a slider.",
-    code: `const h = param.number("height", { min: 10, max: 60, default: 24, step: 1 });
-const base = param.number("base", { min: 2, max: 12, default: 6, step: 0.5 });
+    code: `const h = param.number("height", { min: 10, max: 60, default: 24, step: 1, unit: "mm" });
+const base = param.number("base", { min: 2, max: 12, default: 6, step: 0.5, unit: "mm" });
 return cone(base, 2, h);`,
   },
   {
