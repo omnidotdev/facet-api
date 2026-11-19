@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   FACET_APP_ID,
+  createCardOfferResolver,
   createFundingResolver,
   createTierResolver,
   getWorkspaceCreditBalance,
@@ -332,5 +333,39 @@ describe("resolveManagedEligibility", () => {
     );
     expect(eligibility.isPayingCustomer).toBe(false);
     expect(eligibility.freeAllowance).toBe(false);
+  });
+});
+
+describe("createCardOfferResolver", () => {
+  test("reads a live offer from Aether's public endpoint", async () => {
+    const { fetchImpl, calls } = makeFetch(() =>
+      Response.json({ enabled: true, monthlyCredits: 50 }),
+    );
+    const resolve = createCardOfferResolver({
+      baseUrl: "https://aether.test/",
+      fetch: fetchImpl,
+    });
+    expect(await resolve()).toEqual({ monthlyCredits: 50 });
+    expect(calls[0]?.url).toBe("https://aether.test/card-verification/offer");
+  });
+
+  test("an offer that is off, malformed, unreachable, or unconfigured is none", async () => {
+    for (const respond of [
+      () => Response.json({ enabled: false, monthlyCredits: 50 }),
+      () => Response.json({ enabled: "true", monthlyCredits: 50 }),
+      () => Response.json({ enabled: true }),
+      () => new Response("nope", { status: 500 }),
+      () => {
+        throw new Error("down");
+      },
+    ]) {
+      const { fetchImpl } = makeFetch(respond);
+      const resolve = createCardOfferResolver({
+        baseUrl: "https://aether.test",
+        fetch: fetchImpl,
+      });
+      expect(await resolve()).toBeNull();
+    }
+    expect(await createCardOfferResolver({ baseUrl: undefined })()).toBeNull();
   });
 });

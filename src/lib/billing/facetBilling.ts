@@ -241,3 +241,43 @@ export const resolveManagedEligibility = async (
     freeAllowance: !isPayingCustomer && funding.cardVerified === true,
   };
 };
+
+/** Whether Aether offers card-verified free AI credits, and their size */
+export type CardOfferResolver = () => Promise<{
+  monthlyCredits: number;
+} | null>;
+
+/**
+ * Build a resolver over Aether's public `GET /card-verification/offer`. Null
+ * (no offer) when unconfigured, off, unreachable, or off-contract, so Facet
+ * never advertises an offer that is switched off
+ */
+export const createCardOfferResolver = (config: {
+  baseUrl: string | undefined;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+}): CardOfferResolver => {
+  const baseUrl = config.baseUrl?.replace(/\/+$/, "");
+  const fetchImpl = config.fetch ?? fetch;
+  const timeoutMs = config.timeoutMs ?? FUNDING_TIMEOUT_MS;
+
+  return async () => {
+    if (!baseUrl) return null;
+    try {
+      const response = await fetchImpl(`${baseUrl}/card-verification/offer`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) return null;
+      const body = (await response.json()) as Record<string, unknown> | null;
+      const credits = body?.monthlyCredits;
+      return body?.enabled === true &&
+        typeof credits === "number" &&
+        Number.isFinite(credits) &&
+        credits > 0
+        ? { monthlyCredits: credits }
+        : null;
+    } catch {
+      return null;
+    }
+  };
+};

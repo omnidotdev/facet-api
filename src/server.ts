@@ -15,6 +15,7 @@ import webhooks from "webhooks";
 
 import { authenticateUser } from "lib/auth/authenticateUser";
 import {
+  createCardOfferResolver,
   createFundingResolver,
   createTierResolver,
 } from "lib/billing/facetBilling";
@@ -118,6 +119,9 @@ const resolveFunding = createFundingResolver({
   serviceApiKey: BILLING_SERVICE_API_KEY,
   onError: (reason) => console.error(`[billing] ${reason}`),
 });
+// Whether Aether offers card-verified free AI credits (public read), so the
+// app offers "Add a card" to a refused user only while the offer is live
+const resolveCardOffer = createCardOfferResolver({ baseUrl: BILLING_BASE_URL });
 // Consented AI training/eval store: the only place the service persists a
 // user's prompt or code, and only ever for a signed-in user who has opted in
 // (the store enforces the consent gate and erases a user's samples when they
@@ -318,6 +322,7 @@ const app = new Elysia({
       billing,
       resolveTier,
       resolveFunding,
+      resolveCardOffer,
       store: sampleStore,
     }),
   )
