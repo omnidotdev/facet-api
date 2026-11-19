@@ -1,5 +1,41 @@
 # @omnidotdev/facet-api
 
+## 0.5.0
+
+### Minor Changes
+
+- [#57](https://github.com/omnidotdev/facet-api/pull/57) [`ab8c7c1`](https://github.com/omnidotdev/facet-api/commit/ab8c7c135522f96f0a6bbc32c9ccf6f69ba59dd8) Thanks [@coopbri](https://github.com/coopbri)! - Managed AI generation can now run in the background. `POST /generations` runs the same checks as `/generate` and queues the generation as a job, so it keeps going and its result waits even if the panel is closed or the page is left. `GET /generations` lists your recent jobs, `GET /generations/:id` reads one, and `DELETE /generations/:id` dismisses one. You can have up to 3 generations queued or running at once. A job's prompt and result are deleted when you dismiss it or 24 hours after it was queued, whichever comes first. A generation cut short by a restart is marked as interrupted so you can try again; it is never re-run (and re-billed) on its own. Your own Synapse key still uses the synchronous `/generate`, and older clients keep working.
+
+- [#54](https://github.com/omnidotdev/facet-api/pull/54) [`2b67223`](https://github.com/omnidotdev/facet-api/commit/2b67223843908872f9552bf96c75a4613a9169a8) Thanks [@coopbri](https://github.com/coopbri)! - feat(billing): bill managed AI to the user's personal workspace
+
+  Managed AI generation and critique now bill the signed-in user's personal workspace instead of the user directly, matching how plans are bought in the Omni account hub. A Facet Pro plan purchased there now applies in Facet: its tier, its included credits, and its pooled balance. `GET /capabilities` reports that workspace's tier and credit balance and adds `workspace.slug` so the app can link to the workspace's plan and credits. A sign-in that does not carry the personal workspace (for example one made before Facet asked for workspace access) is asked to sign in again: managed AI returns `401` and `GET /capabilities` reports `reauthRequired: true`, and it is never billed elsewhere. Gateway refusals now map to clearer messages: a reached usage limit returns `429` and a plan that does not include managed AI returns `403`.
+
+- [#59](https://github.com/omnidotdev/facet-api/pull/59) [`56218b2`](https://github.com/omnidotdev/facet-api/commit/56218b2887ff916bd306d218254bf7d852fd4075) Thanks [@coopbri](https://github.com/coopbri)! - Tell the app when free AI credits are offered
+
+  `/capabilities` adds `cardOffer: { monthlyCredits }` to a refused (`paymentRequired`) answer while Aether offers card-verified free AI credits, so the app offers "Add a card" only while the offer is live. Read from Aether's public offer endpoint; any failure means no offer.
+
+- [#58](https://github.com/omnidotdev/facet-api/pull/58) [`091fb6c`](https://github.com/omnidotdev/facet-api/commit/091fb6c08bb355f5de2c9adfef186fcd2421b638) Thanks [@coopbri](https://github.com/coopbri)! - Serve the card-verified free AI allowance
+
+  A free workspace whose owner verified a card on the account hub (Aether funding `cardVerified`) may now use managed generation; the gateway holds it to the free model, and its spend counts toward the free-tier daily breaker. `/capabilities` reports it as `freeAllowance: true`. Workspaces without a paid tier, bought credits, or a verified card are refused as before.
+
+- [#50](https://github.com/omnidotdev/facet-api/pull/50) [`88b8e34`](https://github.com/omnidotdev/facet-api/commit/88b8e34b086c02e4545308f8816ab750e4cb5f7c) Thanks [@coopbri](https://github.com/coopbri)! - feat(consent): unify AI-training consent onto the central platform ledger
+
+  The in-app data-sharing toggle now forwards each decision to the Omni platform consent ledger (omni-api), so a user's opt-in is recorded fleet-wide and reflected on other surfaces such as the account hub. Facet also consumes `platform.consent.changed` at `/webhooks/consent` (signature-verified), so a withdrawal made on any surface erases this user's stored samples here too. The local user row stays the capture-gate projection; forwarding is best-effort and never blocks the user's own toggle.
+
+- [#55](https://github.com/omnidotdev/facet-api/pull/55) [`013750a`](https://github.com/omnidotdev/facet-api/commit/013750afadf1507bbdd2359f0348c6462859ff30) Thanks [@coopbri](https://github.com/coopbri)! - feat(billing): make managed AI a paying-customer feature
+
+  Managed AI generation and critique are now available only to paying customers: a workspace on a paid Facet plan, or one that has bought Omni credits. Free monthly credit grants alone no longer unlock managed AI. A workspace that has not paid gets `402` with `code: "payment_required"` and a message to buy credits, upgrade to Pro, or use its own key, and is never charged. Using your own Synapse key keeps working for everyone. `GET /capabilities` now reports `paymentRequired: true` (with the tier, workspace, and credit balance when known) for a signed-in user who has not paid, so the app can offer those options. Error bodies from `/generate` and `/critique` now include a stable `code` alongside the message, so the app can tell "not a paying customer" (`payment_required`) apart from "out of credits" (`out_of_credits`).
+
+### Patch Changes
+
+- [#56](https://github.com/omnidotdev/facet-api/pull/56) [`8911674`](https://github.com/omnidotdev/facet-api/commit/891167441a27eb8cc2c7820d90764f8da0a3efae) Thanks [@coopbri](https://github.com/coopbri)! - Fix AI generation failing with "Could not generate valid code" on more detailed parts. Current models think before answering, and that thinking counts toward the output limit, so 2,048 tokens could run out before the code finished. The output limit is now 8,192 tokens (the catalog's per-request maximum) with a 90 second timeout to match, and a generation that still runs out returns a clear `truncated` error asking for a simpler description instead of the generic one.
+
+- [#53](https://github.com/omnidotdev/facet-api/pull/53) [`94bafdd`](https://github.com/omnidotdev/facet-api/commit/94bafdd76bbeaa45502fada10850d27b1af42541) Thanks [@coopbri](https://github.com/coopbri)! - Security: the GraphQL endpoint no longer exposes any data or write operations. Facet's features run entirely through its authenticated routes, so nothing changes for users.
+
+- [#60](https://github.com/omnidotdev/facet-api/pull/60) [`875ae6d`](https://github.com/omnidotdev/facet-api/commit/875ae6ddc9c5fcacf9f97015d5672fcbaca45ae0) Thanks [@coopbri](https://github.com/coopbri)! - Generated models now label their sliders with units: lengths read in millimeters and angles in degrees.
+
+- [#61](https://github.com/omnidotdev/facet-api/pull/61) [`4241afc`](https://github.com/omnidotdev/facet-api/commit/4241afcdefa98b5b1683e693f3e54f8bf90aa83c) Thanks [@coopbri](https://github.com/coopbri)! - Move to the `@omnidotdev/providers` v0.2.0 release.
+
 ## 0.4.0
 
 ### Minor Changes
