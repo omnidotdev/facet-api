@@ -169,7 +169,7 @@ const API_SPEC: ApiGroup[] = [
         signature:
           "param.number(name: string, opts?: { min?: number; max?: number; step?: number; default?: number; unit?: string }): number",
         summary:
-          "Register a numeric parameter and return its current value, in mm or the model's own unit. Always set unit so the slider is labeled: unit: \"mm\" for any length, size, radius, or thickness, unit: \"°\" for an angle, and omit it only for a plain count (teeth, segments, copies).",
+          'Register a numeric parameter and return its current value, in mm or the model\'s own unit. Always set unit so the slider is labeled: unit: "mm" for any length, size, radius, or thickness, unit: "°" for an angle, and omit it only for a plain count (teeth, segments, copies).',
       },
       {
         signature:
