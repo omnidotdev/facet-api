@@ -9,7 +9,11 @@ import { getAiConfig } from "lib/config/ai.config";
 
 import type { BillingProvider } from "@omnidotdev/providers";
 import type { Authenticate } from "lib/auth/authenticateUser";
-import type { FundingResolver, TierResolver } from "lib/billing/facetBilling";
+import type {
+  CardOfferResolver,
+  FundingResolver,
+  TierResolver,
+} from "lib/billing/facetBilling";
 import type { SampleStore } from "lib/routes/sampleStore";
 
 interface CapabilitiesDeps {
@@ -23,6 +27,12 @@ interface CapabilitiesDeps {
    * failure). Read only for a free tier
    */
   resolveFunding: FundingResolver;
+  /**
+   * Whether Aether offers card-verified free AI credits, so a refused user is
+   * offered "Add a card" only while the offer is live. Optional: absent or
+   * failing means no offer
+   */
+  resolveCardOffer?: CardOfferResolver;
   /**
    * Read the user's AI-training-data consent, so the client can reflect the
    * current state of the opt-in toggle. Optional and never gating: an absent
@@ -109,6 +119,9 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
     const credits = balance !== null ? { credits: { balance } } : {};
 
     if (!isPayingCustomer && !freeAllowance) {
+      const cardOffer = deps.resolveCardOffer
+        ? await deps.resolveCardOffer().catch(() => null)
+        : null;
       return {
         signedIn: true,
         managedGeneration: false,
@@ -116,6 +129,7 @@ export const createCapabilitiesRoute = (deps: CapabilitiesDeps) =>
         tier,
         workspace: { slug: workspace.slug },
         ...credits,
+        ...(cardOffer ? { cardOffer } : {}),
       };
     }
 

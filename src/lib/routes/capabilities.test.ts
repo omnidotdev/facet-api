@@ -56,6 +56,7 @@ const probe = (
   tierCalls: string[] = [],
   funding: WorkspaceFunding | Error = FUNDED,
   fundingCalls: string[] = [],
+  cardOffer?: () => Promise<{ monthlyCredits: number } | null>,
 ) =>
   createCapabilitiesRoute({
     authenticate,
@@ -69,6 +70,7 @@ const probe = (
       if (funding instanceof Error) throw funding;
       return funding;
     },
+    resolveCardOffer: cardOffer,
     store,
   }).handle(new Request("http://local/capabilities"));
 
@@ -339,6 +341,47 @@ describe("/capabilities", () => {
         workspace: { slug: "user-1" },
         credits: { balance: 25 },
       });
+    });
+
+    test("a refused workspace is offered free AI credits while the offer is on", async () => {
+      const body = await (
+        await probe(
+          signedInAs("user-1"),
+          makeBilling(0).billing,
+          "free",
+          undefined,
+          [],
+          NOT_FUNDED,
+          [],
+          async () => ({ monthlyCredits: 50 }),
+        )
+      ).json();
+      expect(body.paymentRequired).toBe(true);
+      expect(body.cardOffer).toEqual({ monthlyCredits: 50 });
+    });
+
+    test("no card offer while it is off or the lookup fails", async () => {
+      for (const cardOffer of [
+        async () => null,
+        async () => {
+          throw new Error("aether down");
+        },
+      ]) {
+        const body = await (
+          await probe(
+            signedInAs("user-1"),
+            makeBilling(0).billing,
+            "free",
+            undefined,
+            [],
+            NOT_FUNDED,
+            [],
+            cardOffer,
+          )
+        ).json();
+        expect(body.paymentRequired).toBe(true);
+        expect(body.cardOffer).toBeUndefined();
+      }
     });
 
     test("a never-paid workspace with an unknown balance omits credits", async () => {
