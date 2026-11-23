@@ -242,6 +242,11 @@ const API_SPEC: ApiGroup[] = [
         summary:
           "Hollow the solid to a wall of thickness mm, opening the top +Z face. Exact geometry (B-rep); the Studio auto-switches kernels.",
       },
+      {
+        signature: "color(color: string | [number, number, number]): Shape",
+        summary:
+          'Color this part: a CSS color name ("red", "gold"), a hex code ("#1d3557"), or [r, g, b] from 0 to 1. Differently colored parts of a union stay separate bodies and export to 3MF as separate parts, one filament each; an inner color wins over an outer one.',
+      },
     ],
   },
 ];
@@ -395,6 +400,7 @@ Output contract (strict):
 - All lengths are in millimeters (mm); all angles are in degrees.
 - Use only the API documented below. Do not invent functions or methods.
 - fillet, chamfer and shell are exact-geometry (B-rep) operations; the Studio switches to the exact kernel automatically when they are used.
+- Use \`.color()\` only when the user asks for colors or a multi-color print. For an inlay or two-color label, cut a pocket into the base and fill it with a separately colored part (\`base.subtract(pocket).color("navy").union(fill.color("white"))\`), so the parts touch without overlapping.
 - For a polygonal prism (hex nut, octagonal post), use a cylinder whose \`segments\` equals the number of sides; do not try to build it from flat faces.
 - For letters, digits, or words, use \`text("...")\`: it renders them precisely in the bundled font (extrude it for a raised label, subtract an extruded copy to engrave). Do NOT hand-write an SVG path to draw a named glyph or logo (a zodiac sign, a company mark): a path invented from memory comes out wrong, so reach for \`importSvg\` ONLY when the user actually provides the SVG path. For a geometric symbol (a star, heart, arrow, shield), build it from primitives and a 2D sketch (see the symmetric-profile and sketch rules below), not a freehand path.
 - For a curvy or custom profile that is NOT a known glyph (a cam, a gear outline, a bracket), sketch it in 2D with circle/square/polygon (combine them with 2D booleans), then \`extrude\` it; for anything with rotational symmetry (a bottle, a vase, a turned knob, an O-ring), sketch the cross-section and \`revolve\` it. This is exact and far cleaner than approximating a curve with stacked or boolean'd solids.

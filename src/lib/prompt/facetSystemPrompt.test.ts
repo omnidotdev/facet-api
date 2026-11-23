@@ -47,6 +47,7 @@ describe("buildSystemPrompt", () => {
       "fillet",
       "chamfer",
       "shell",
+      "color",
     ]) {
       expect(prompt).toContain(method);
     }
