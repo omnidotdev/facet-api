@@ -234,6 +234,7 @@ const ENV_KEYS = [
   "SYNAPSE_API_URL",
   "SYNAPSE_GATEWAY_SECRET",
   "MAX_PROMPT_CHARS",
+  "MAX_CODE_CHARS",
   "MAX_OUTPUT_TOKENS",
   "MAX_REPAIR_ATTEMPTS",
   "FACET_MANAGED_ALLOWLIST",
@@ -920,6 +921,125 @@ describe("POST /generate", () => {
     expect(text).toContain("cube(10)");
     expect(text).toContain("curved tail");
     expect(text).not.toMatch(/threw|error/i);
+  });
+
+  describe("edits", () => {
+    // Capture the messages the route builds for each call
+    const recording = () => {
+      const seen: { role: string; content: string }[][] = [];
+      const caller = (async (input: {
+        apiKey?: string;
+        messages: { role: string; content: string }[];
+      }) => {
+        seen.push(input.messages);
+        return {
+          text: FENCED,
+          usage: { inputTokens: 100, outputTokens: 50, costCents: 1.4 },
+        };
+      }) as Caller;
+      return { seen, caller };
+    };
+
+    test("opens on the user's model and the change they asked for", async () => {
+      const { seen, caller } = recording();
+      const request = makeApp({ caller });
+
+      const res = await request({
+        prompt: "make the ring thicker",
+        edit: { code: "const ring = cylinder(20, 5);\nreturn ring;" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(seen).toHaveLength(1);
+      const messages = seen[0]!;
+      expect(messages[0]!.role).toBe("user");
+      expect(messages[0]!.content).toContain("cylinder(20, 5)");
+      expect(messages[0]!.content).toContain("make the ring thicker");
+    });
+
+    test("carries the slider values into the edit, and refuses malformed ones", async () => {
+      const { seen, caller } = recording();
+      const request = makeApp({ caller });
+
+      const ok = await request({
+        prompt: "make the ring thicker",
+        edit: { code: "return cube(10);", params: { "sun teeth": 17 } },
+      });
+      expect(ok.status).toBe(200);
+      expect(seen[0]![0]!.content).toContain('"sun teeth" = 17');
+
+      for (const params of [
+        "sun teeth=17",
+        [17],
+        { "sun teeth": { nested: true } },
+        { "sun teeth": Number.POSITIVE_INFINITY },
+        Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`p${i}`, i])),
+      ]) {
+        const res = await request({
+          prompt: "make the ring thicker",
+          edit: { code: "return cube(10);", params },
+        });
+        expect(res.status).toBe(400);
+      }
+      expect(seen).toHaveLength(1);
+    });
+
+    test("a repair of an edit keeps the edit's model and request", async () => {
+      const { seen, caller } = recording();
+      const request = makeApp({ caller });
+
+      const res = await request({
+        prompt: "make the ring thicker",
+        edit: { code: "const ring = cylinder(20, 5);\nreturn ring;" },
+        previous: { code: "return rnig;", error: "ReferenceError: rnig" },
+        attempt: 1,
+      });
+
+      expect(res.status).toBe(200);
+      const text = seen[0]!.map((m) => m.content).join("\n");
+      expect(text).toContain("cylinder(20, 5)");
+      expect(text).toContain("make the ring thicker");
+      expect(text).toContain("ReferenceError: rnig");
+    });
+
+    test("missing, empty, or oversized edit code is 400 without calling Synapse", async () => {
+      process.env.MAX_CODE_CHARS = "50";
+      const { seen, caller } = recording();
+      const request = makeApp({ caller });
+
+      for (const edit of [{}, { code: "  " }, { code: "x".repeat(51) }]) {
+        const res = await request({ prompt: "make it taller", edit });
+        expect(res.status).toBe(400);
+      }
+      expect(seen).toHaveLength(0);
+    });
+
+    test("is marked as an edit in telemetry", async () => {
+      const { events, emitted } = makeEvents();
+      const request = makeApp({ events });
+
+      const res = await request({
+        prompt: "make it taller",
+        edit: { code: "return cube(10);" },
+      });
+
+      expect(res.status).toBe(200);
+      await Promise.resolve();
+      expect(emitted[0]!.data).toMatchObject({ edited: true, refined: false });
+    });
+
+    test("is never captured as a training sample", async () => {
+      const { samples, captured } = makeSamples();
+      const request = makeApp({ samples });
+
+      const res = await request({
+        prompt: "make it taller",
+        edit: { code: "return cube(10);" },
+      });
+
+      expect(res.status).toBe(200);
+      expect(captured).toHaveLength(0);
+    });
   });
 
   test("captures the consented sample for a managed generation (prompt, code, user, chain id)", async () => {

@@ -102,6 +102,11 @@ interface AiConfig {
   /** Maximum accepted prompt length in characters. */
   maxPromptChars: number;
   /**
+   * Maximum length in characters of the model code an edit request sends
+   * along, so a pasted giant file cannot run up a huge input bill
+   */
+  maxCodeChars: number;
+  /**
    * Maximum output tokens requested from the model. Current models think by
    * default and their hidden thinking counts toward this ceiling, so it must
    * leave room for thinking plus the code (2048 cut real parts off mid-code).
@@ -173,6 +178,7 @@ export const getAiConfig = (): AiConfig => {
     fallbackRate: rateForModel(fallbackModel),
     managedEnabled: Boolean(synapseApiUrl && synapseGatewaySecret),
     maxPromptChars: toInt(env.MAX_PROMPT_CHARS, 2000),
+    maxCodeChars: toInt(env.MAX_CODE_CHARS, 100_000),
     maxOutputTokens: toInt(env.MAX_OUTPUT_TOKENS, 8192),
     requestTimeoutMs: toInt(env.AI_REQUEST_TIMEOUT_MS, 90_000),
     maxRepairAttempts: toInt(env.MAX_REPAIR_ATTEMPTS, 2),

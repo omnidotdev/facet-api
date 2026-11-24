@@ -252,6 +252,16 @@ describe("POST /generations", () => {
       ).toMatchObject({ status: 400, body: { code: "bad_input" } });
     });
 
+    test("an edit is refused (400 bad_input): it runs in the foreground", async () => {
+      const app = makeApp();
+      expect(
+        await refused(app, {
+          prompt: "make it taller",
+          edit: { code: "return cube(10);" },
+        }),
+      ).toMatchObject({ status: 400, body: { code: "bad_input" } });
+    });
+
     test("the per-IP limiter is 429 rate_limited", async () => {
       const app = makeApp({
         rateLimiter: { allow: () => false },

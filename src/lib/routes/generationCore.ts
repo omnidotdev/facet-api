@@ -1,5 +1,6 @@
 import { getAiConfig } from "lib/config/ai.config";
 import {
+  buildEditMessages,
   buildRefineMessages,
   buildRepairMessages,
   buildSystemPrompt,
@@ -92,6 +93,11 @@ export interface GenerationBody {
   previous?: { code?: unknown; error?: unknown };
   /** A render-critic refine pass: prior code plus the critic's visual suggestion. */
   refine?: { code?: unknown; suggestion?: unknown };
+  /**
+   * An edit: the model open in the user's editor, which the prompt asks to
+   * change. Kept on that edit's repairs too, so a fix still knows the request
+   */
+  edit?: { code?: unknown; params?: unknown };
   attempt?: unknown;
   /**
    * The generation id of the chain this call belongs to. The client echoes the
@@ -101,24 +107,79 @@ export interface GenerationBody {
   generationId?: unknown;
 }
 
+/** Parameter slider values by name, as an edit sends them */
+export type EditParams = Record<string, number | boolean | string>;
+
+// How many parameter values an edit may carry, and how long a name or a text
+// value may be, so the field cannot be used to smuggle a large input
+const MAX_EDIT_PARAMS = 64;
+const MAX_PARAM_NAME = 80;
+const MAX_PARAM_TEXT = 200;
+
+/** Read an edit's parameter values, or null when they are malformed */
+const parseEditParams = (input: unknown): EditParams | null => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const entries = Object.entries(input);
+  if (entries.length > MAX_EDIT_PARAMS) return null;
+  const params: EditParams = {};
+  for (const [name, value] of entries) {
+    if (name.length === 0 || name.length > MAX_PARAM_NAME) return null;
+    const ok =
+      (typeof value === "number" && Number.isFinite(value)) ||
+      typeof value === "boolean" ||
+      (typeof value === "string" && value.length <= MAX_PARAM_TEXT);
+    if (!ok) return null;
+    params[name] = value;
+  }
+  return params;
+};
+
+/**
+ * What a request does. An edit runs only in the foreground (`POST /generate`),
+ * so it is not a background job kind
+ */
+export type GenerationKind = GenerationJobKind | "edit";
+
 /** A validated generation request, the same whether it runs now or as a job */
 export interface GenerationRequest {
   prompt: string;
-  kind: GenerationJobKind;
+  kind: GenerationKind;
   /** Prior code plus its kernel error, on a repair */
   previous?: { code: string; error: string };
   /** Prior code plus the critic's suggestion, on a refine */
   refine?: { code: string; suggestion: string };
+  /**
+   * The open model the prompt asks to change, on an edit and its repairs, with
+   * the values its parameter sliders are set to right now
+   */
+  edit?: { code: string; params?: EditParams };
   attempt: number;
   generationId: string;
 }
 
+/** A request a background job can run: anything but an edit */
+export type QueuedGenerationRequest = GenerationRequest & {
+  kind: GenerationJobKind;
+  edit?: undefined;
+};
+
+/** Whether a request can run as a background job (an edit cannot) */
+export const isQueueable = (
+  request: GenerationRequest,
+): request is QueuedGenerationRequest =>
+  request.kind !== "edit" && request.edit === undefined;
+
 /**
  * Read a generation request from a body, or null when the prompt is missing or
- * over the cap. Two mutually exclusive follow-up paths extend the original user
- * turn: a kernel-error repair (prior code plus the thrown error) or a
- * render-critic refine (prior code plus a visual suggestion). Repair wins if
- * both are somehow present, since an error is the harder stop
+ * over the cap, or an edit's code is empty or over its cap. Two mutually
+ * exclusive follow-up paths extend the original user turn: a kernel-error
+ * repair (prior code plus the thrown error) or a render-critic refine (prior
+ * code plus a visual suggestion). Repair wins if both are somehow present,
+ * since an error is the harder stop. An edit (the open model plus a requested
+ * change) replaces the original user turn, and a repair of the edited code
+ * keeps it
  */
 export const parseGenerationRequest = (
   input: GenerationBody,
@@ -139,6 +200,24 @@ export const parseGenerationRequest = (
   const generationId = resolveGenerationId(input.generationId);
   const { previous, refine } = input;
 
+  let edit: GenerationRequest["edit"];
+  if (input.edit !== undefined) {
+    const code = input.edit?.code;
+    if (
+      typeof code !== "string" ||
+      code.trim().length === 0 ||
+      code.length > cfg.maxCodeChars
+    ) {
+      return null;
+    }
+    edit = { code };
+    if (input.edit?.params !== undefined) {
+      const params = parseEditParams(input.edit.params);
+      if (!params) return null;
+      if (Object.keys(params).length > 0) edit.params = params;
+    }
+  }
+
   if (
     previous &&
     typeof previous.code === "string" &&
@@ -148,6 +227,7 @@ export const parseGenerationRequest = (
       prompt,
       kind: "repair",
       previous: { code: previous.code, error: previous.error },
+      ...(edit ? { edit } : {}),
       attempt,
       generationId,
     };
@@ -165,6 +245,7 @@ export const parseGenerationRequest = (
       generationId,
     };
   }
+  if (edit) return { prompt, kind: "edit", edit, attempt, generationId };
   return { prompt, kind: "draft", attempt, generationId };
 };
 
@@ -172,20 +253,23 @@ export const parseGenerationRequest = (
 const buildMessages = (
   request: GenerationRequest,
 ): { role: "user" | "assistant"; content: string }[] => {
-  const userTurn = { role: "user" as const, content: request.prompt };
+  // an edit opens on the user's model and the change they asked for
+  const opening = request.edit
+    ? buildEditMessages(request.edit.code, request.prompt, request.edit.params)
+    : [{ role: "user" as const, content: request.prompt }];
   if (request.previous) {
     return [
-      userTurn,
+      ...opening,
       ...buildRepairMessages(request.previous.code, request.previous.error),
     ];
   }
   if (request.refine) {
     return [
-      userTurn,
+      ...opening,
       ...buildRefineMessages(request.refine.code, request.refine.suggestion),
     ];
   }
-  return [userTurn];
+  return opening;
 };
 
 export interface GenerationCoreDeps {
@@ -303,6 +387,7 @@ export const runGeneration = async (
         costCents: result.usage.costCents,
         repaired: request.attempt > 0,
         refined: request.kind === "refine",
+        edited: request.edit !== undefined,
       },
       ...(userId ? { subject: userId } : {}),
     })
@@ -312,8 +397,10 @@ export const runGeneration = async (
 
   // consented eval capture: retain the prompt and final code as AI training
   // data, but ONLY for a signed-in managed user who opted in (the store
-  // enforces the consent gate). A BYOK call (no `userId`) never reaches it
-  if (userId) {
+  // enforces the consent gate). A BYOK call (no `userId`) never reaches it.
+  // An edit is not captured: its prompt is a change to code the sample would
+  // not hold, and the consent covers prompts and the models generated from them
+  if (userId && !request.edit) {
     void deps.samples
       ?.capture({
         generationId: request.generationId,
