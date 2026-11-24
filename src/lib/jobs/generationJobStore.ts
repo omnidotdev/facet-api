@@ -16,7 +16,7 @@ import { generationJobTable } from "lib/db/schema";
 
 import type { dbPool } from "lib/db";
 import type { SelectGenerationJob } from "lib/db/schema";
-import type { GenerationRequest } from "lib/routes/generationCore";
+import type { QueuedGenerationRequest } from "lib/routes/generationCore";
 
 /**
  * Durable queue behind background AI generation (`POST /generations`).
@@ -50,7 +50,7 @@ export interface NewGenerationJob {
   userId: string;
   workspaceId: string;
   isPayingCustomer: boolean;
-  request: GenerationRequest;
+  request: QueuedGenerationRequest;
 }
 
 /** A finished job's failure: the stable code, user-safe message, and HTTP status */

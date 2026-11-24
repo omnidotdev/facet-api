@@ -416,6 +416,40 @@ Examples:
 ${renderFewShot()}`;
 
 /**
+ * Build the opening turn of an edit: the user asks for a change to the model
+ * already open in their editor, so the turn carries that code, the values its
+ * parameter sliders are set to, and the request, and asks for the whole
+ * updated model back with everything else left as is. The Studio applies the
+ * updated model's defaults to the sliders, so the defaults must carry the
+ * current values forward. A repair of the edited code appends its turns after
+ * this one
+ */
+export const buildEditMessages = (
+  code: string,
+  request: string,
+  params?: Record<string, number | boolean | string>,
+): PromptMessage[] => {
+  const entries = Object.entries(params ?? {});
+  const sliders =
+    entries.length > 0
+      ? `\n\nIts parameters are currently set to: ${entries
+          .map(
+            ([name, value]) =>
+              `${JSON.stringify(name)} = ${JSON.stringify(value)}`,
+          )
+          .join(
+            ", ",
+          )}. In the updated model, make each parameter's default its current value, unless the request changes it.`
+      : "";
+  return [
+    {
+      role: "user",
+      content: `This Facet model is open in my editor:\n\n\`\`\`ts\n${code}\n\`\`\`${sliders}\n\nChange it as follows: ${request}\n\nKeep everything the request does not mention as it is, including the parameters (their names and ranges), colors, and comments. Reply with the complete updated model as a single fenced ts code block, no prose.`,
+    },
+  ];
+};
+
+/**
  * Build the repair turns for a follow-up attempt. The route prepends the
  * original user prompt; these add the model's prior code and the kernel error,
  * ending on a user turn that asks for a corrected single fenced ts block

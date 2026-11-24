@@ -4,6 +4,7 @@ import { getAiConfig } from "lib/config/ai.config";
 import {
   clientIp,
   errorBody,
+  isQueueable,
   parseGenerationRequest,
 } from "lib/routes/generationCore";
 import { resolveManagedAccess } from "lib/routes/managedAccess";
@@ -103,8 +104,13 @@ export const createGenerationsRoute = (deps: GenerationsDeps) => {
         return errorBody("badPrompt");
       }
 
-      // 2. a caller's own key is never stored, so BYOK stays synchronous
-      if (typeof input.byokKey === "string" && input.byokKey.length > 0) {
+      // 2. a caller's own key is never stored, so BYOK stays synchronous, and
+      // an edit applies to the editor it came from, so it runs in the
+      // foreground too
+      if (
+        (typeof input.byokKey === "string" && input.byokKey.length > 0) ||
+        !isQueueable(parsed)
+      ) {
         set.status = 400;
         return errorBody("badInput");
       }

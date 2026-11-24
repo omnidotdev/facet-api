@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildEditMessages,
   buildRefineMessages,
   buildRepairMessages,
   buildSystemPrompt,
@@ -95,6 +96,45 @@ describe("buildSystemPrompt", () => {
     const fenced = prompt.match(/```ts[\s\S]*?```/g) ?? [];
     // one block documents nothing by itself, examples add more
     expect(fenced.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("buildEditMessages", () => {
+  test("carries the open model and the requested change in one user turn", () => {
+    const messages = buildEditMessages(
+      "const x = cube(10);\nreturn x;",
+      "make it twice as tall",
+    );
+
+    expect(messages).toHaveLength(1);
+    const turn = messages[0]!;
+    expect(turn.role).toBe("user");
+    expect(turn.content).toContain("cube(10)");
+    expect(turn.content).toContain("make it twice as tall");
+    // the rest of the model, its parameters included, stays as it is
+    expect(turn.content).toMatch(/keep everything/i);
+    expect(turn.content).toMatch(/parameters/i);
+    expect(turn.content).toMatch(/fenced ts|single.*block/i);
+  });
+
+  test("carries the current slider values and asks for them as defaults", () => {
+    const [turn] = buildEditMessages(
+      'return cube(param.number("size"));',
+      "round the edges",
+      {
+        size: 24,
+        hollow: true,
+      },
+    );
+
+    expect(turn!.content).toContain('"size" = 24');
+    expect(turn!.content).toContain('"hollow" = true');
+    expect(turn!.content).toMatch(/default its current value/i);
+  });
+
+  test("says nothing about sliders when the model has none", () => {
+    const [turn] = buildEditMessages("return cube(10);", "make it bigger");
+    expect(turn!.content).not.toMatch(/currently set to/i);
   });
 });
 
