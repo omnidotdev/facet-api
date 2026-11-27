@@ -23,7 +23,7 @@ jobs:
     name: Version 🦋
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -39,7 +39,7 @@ jobs:
       # npm publish for this private package and git-tags the release because
       # privatePackages.tag is on.
       - name: Create release pull request or tag release
-        uses: changesets/action@v1
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
           version: bunx changeset version
           publish: bunx changeset publish
