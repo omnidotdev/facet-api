@@ -7,7 +7,7 @@
   "main": "build/server.js",
   "module": "build/server.js",
   "type": "module",
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.5",
   "scripts": {
     "dev": "NODE_ENV=development GRAPHILE_ENV=development bun run --watch src/server.ts",
     "build": "bun build --target node --outdir build src/server.ts",
@@ -38,7 +38,7 @@
     "msw"
   ],
   "devDependencies": {
-    "@biomejs/biome": "2.3.12",
+    "@biomejs/biome": "2.6.9",
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
     "@faker-js/faker": "^10.2.0",
@@ -75,9 +75,9 @@
     "pg": "^8.17.2",
     "postgraphile": "^5.0.0-rc.3",
     "postgraphile-plugin-connection-filter": "^3.0.0-rc.1",
-    "@omnidotdev/providers": "github:omnidotdev/providers#v0.2.0"
+    "@omnidotdev/providers": "github:omnidotdev/providers#v0.4.1"
   },
   "overrides": {
-    "grafast": "1.0.0-rc.3"
+    "grafast": "1.2.1"
   }
 }
